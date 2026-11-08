@@ -1,0 +1,53 @@
+name: 뉴스 수집
+
+on:
+  schedule:
+    # 한국시간 7·10·13·16·19·22시 5분 (UTC로 적는다). GitHub 사정으로 몇 분~수십 분 늦게 돌 수 있다.
+    - cron: "5 22,1,4,7,10,13 * * *"
+  workflow_dispatch:        # Actions 탭에서 'Run workflow'로 바로 돌릴 때
+  push:
+    branches: [main]
+    paths:                  # 규칙(config)이나 수집 코드를 고치면 저장된 오늘·어제 기사에 바로 다시 적용
+      - "config/**"
+      - "collect.py"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: collect
+  cancel-in-progress: false
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 뉴스 수집·정리
+        env:
+          NAVER_CLIENT_ID: ${{ secrets.NAVER_CLIENT_ID }}
+          NAVER_CLIENT_SECRET: ${{ secrets.NAVER_CLIENT_SECRET }}
+          PYTHONUTF8: "1"
+        run: |
+          if [ "${{ github.event_name }}" = "push" ] && ls docs/data/20*.json >/dev/null 2>&1; then
+            python3 collect.py --reprocess
+          elif [ -z "$NAVER_CLIENT_ID" ] || [ -z "$NAVER_CLIENT_SECRET" ]; then
+            echo "::warning::네이버 API 키(NAVER_CLIENT_ID, NAVER_CLIENT_SECRET)가 아직 Secrets에 없어 수집을 건너뛴다."
+          else
+            python3 collect.py
+          fi
+
+      - name: 결과 저장
+        run: |
+          git config user.name "news-bot"
+          git config user.email "news-bot@users.noreply.github.com"
+          git add docs/data
+          if git diff --cached --quiet; then
+            echo "바뀐 것 없음"
+            exit 0
+          fi
+          git commit -m "수집 $(TZ=Asia/Seoul date '+%F %H:%M')"
+          git pull --rebase --autostash
+          git push

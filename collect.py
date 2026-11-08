@@ -1,0 +1,752 @@
+# -*- coding: utf-8 -*-
+"""
+Urban Scale 수집기
+
+하는 일
+  1. config/queries.json 의 검색어로 네이버 뉴스 검색 API에서 최근 기사를 모은다.
+  2. 서울·신도시·경기·인천 기사만 남긴다 (config/regions.json).
+  3. 분야를 정한다 (config/categories.json).
+  4. 제목이 비슷한 기사끼리 이슈로 묶고, 다룬 언론사 수로 순위를 매긴다 (config/settings.json 의 '이슈 묶기').
+  5. docs/data/날짜.json 과 docs/data/index.json 에 저장한다. 사이트(docs/index.html)가 이 파일을 읽는다.
+
+실행
+  python collect.py               네이버 API로 수집 (NAVER_CLIENT_ID, NAVER_CLIENT_SECRET 필요. .env 파일도 읽음)
+  python collect.py --source rss  키 없이 구글 뉴스 RSS로 시험 수집 (내 컴퓨터에서 시험할 때만)
+  python collect.py --reprocess   새로 모으지 않고, 저장된 오늘·어제 기사에 바뀐 사전을 다시 적용
+
+외부 패키지 없이 파이썬 기본 기능만 쓴다.
+"""
+
+import argparse
+import hashlib
+import html
+import json
+import math
+import os
+import re
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+import xml.etree.ElementTree as ET
+from collections import Counter, defaultdict
+from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
+
+KST = timezone(timedelta(hours=9))
+ROOT = os.path.dirname(os.path.abspath(__file__))
+CONFIG_DIR = os.path.join(ROOT, "config")
+DATA_DIR = os.path.join(ROOT, "docs", "data")
+USER_AGENT = "Mozilla/5.0 (urban-scale; personal study)"
+
+AREA_ORDER = ["서울", "신도시", "경기·인천", "수도권"]
+NATIONAL = "전국·정책"
+RAW_KEYS = ("id", "t", "d", "u", "o", "p", "at", "q")
+
+
+# ───────────────────────── 설정 읽기 ─────────────────────────
+
+def load_config(name):
+    with open(os.path.join(CONFIG_DIR, name), encoding="utf-8") as f:
+        return json.load(f)
+
+
+def load_env_file():
+    """.env 파일(KEY=값)을 읽어 환경변수로 넣는다. 이미 있는 값은 덮어쓰지 않는다."""
+    path = os.path.join(ROOT, ".env")
+    if not os.path.exists(path):
+        return
+    with open(path, encoding="utf-8-sig") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            key, value = key.strip(), value.strip().strip('"').strip("'")
+            if key and value and not os.environ.get(key):
+                os.environ[key] = value
+
+
+# ───────────────────────── 글자 다듬기 ─────────────────────────
+
+TAG_RX = re.compile(r"<[^>]+>")
+SPACE_RX = re.compile(r"\s+")
+HEAD_RX = re.compile(r"^\s*[\[【〈<(]\s*([^\]】〉>)]{1,20}?)\s*[\]】〉>)]\s*")
+
+
+def clean(text):
+    """HTML 태그(<b> 등)와 &quot; 같은 기호를 걷어 낸다."""
+    text = html.unescape(text or "")
+    text = TAG_RX.sub("", text)
+    text = html.unescape(text)
+    return SPACE_RX.sub(" ", text).strip()
+
+
+def head_tag(title):
+    """제목 맨 앞의 [사설], (종합) 같은 머리말."""
+    m = HEAD_RX.match(title)
+    return m.group(1).strip() if m else ""
+
+
+def article_kind(title, column_words):
+    head = head_tag(title)
+    if not head:
+        return None
+    if "사설" in head:
+        return "사설"
+    if any(w in head for w in column_words):
+        return "칼럼"
+    return None
+
+
+def is_unwanted(title, drop_heads):
+    head = head_tag(title).replace(" ", "")
+    if not head:
+        return False
+    if head.startswith(("포토", "사진", "영상", "화보")):
+        return True
+    return any(head == w.replace(" ", "") for w in drop_heads)
+
+
+# ───────────────────────── 언론사 이름 ─────────────────────────
+
+def host_of(url):
+    try:
+        host = (urllib.parse.urlsplit(url).hostname or "").lower()
+    except ValueError:
+        return ""
+    for prefix in ("www.", "m.", "mobile.", "amp."):
+        if host.startswith(prefix):
+            host = host[len(prefix):]
+    return host
+
+
+def press_of(url, press_map):
+    host = host_of(url)
+    parts = host.split(".")
+    for i in range(len(parts) - 1):
+        candidate = ".".join(parts[i:])
+        if candidate in press_map:
+            return press_map[candidate]
+    return host or "알 수 없음"
+
+
+# ───────────────────────── 기사 받아 오기 ─────────────────────────
+
+def http_get(url, headers=None, tries=3, timeout=20):
+    request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, **(headers or {})})
+    for attempt in range(tries):
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                return response.read()
+        except urllib.error.HTTPError as e:
+            if e.code in (429, 500, 502, 503, 504) and attempt < tries - 1:
+                time.sleep(2 * (attempt + 1))
+                continue
+            raise
+        except (urllib.error.URLError, TimeoutError):
+            if attempt < tries - 1:
+                time.sleep(2 * (attempt + 1))
+                continue
+            raise
+
+
+def parse_time(text):
+    try:
+        return parsedate_to_datetime(text or "").astimezone(KST)
+    except (TypeError, ValueError):
+        return None
+
+
+# 네이버 검색 API는 2026년부터 네이버 클라우드 플랫폼의 NAVER API HUB에서 발급한다(주소·인증 머리글이 바뀜).
+# 예전 네이버 개발자센터 키를 넣으면 옛 주소로 자동으로 넘어간다.
+NAVER_APIS = {
+    "hub": ("https://naverapihub.apigw.ntruss.com/search/v1/news", "X-NCP-APIGW-API-KEY-ID", "X-NCP-APIGW-API-KEY"),
+    "openapi": ("https://openapi.naver.com/v1/search/news.json", "X-Naver-Client-Id", "X-Naver-Client-Secret"),
+}
+
+
+def fetch_naver(query, since, client_id, client_secret, limit, api="hub"):
+    """네이버 뉴스 검색 API. 최신순으로 100개씩 받다가 since보다 오래된 기사가 나오면 멈춘다."""
+    url, id_header, secret_header = NAVER_APIS[api]
+    found = []
+    for start in range(1, min(limit, 1000) + 1, 100):
+        qs = urllib.parse.urlencode({"query": query, "display": 100, "start": start, "sort": "date"})
+        raw = http_get(f"{url}?{qs}", {id_header: client_id, secret_header: client_secret})
+        items = json.loads(raw.decode("utf-8")).get("items", [])
+        reached_old = False
+        for it in items:
+            pub = parse_time(it.get("pubDate"))
+            if pub is None:
+                continue
+            if pub < since:
+                reached_old = True
+                continue
+            link = it.get("link") or ""
+            orig = it.get("originallink") or link
+            found.append({
+                "title": clean(it.get("title")),
+                "desc": clean(it.get("description")),
+                "url": link if "n.news.naver.com" in link else orig,
+                "orig": orig,
+                "pub": pub,
+                "press": None,
+            })
+        if reached_old or len(items) < 100:
+            break
+        time.sleep(0.1)
+    return found
+
+
+def fetch_google_rss(query, since):
+    """시험용: 키 없이 구글 뉴스 RSS에서 제목만 받아 온다. 요약은 없다."""
+    qs = urllib.parse.urlencode({"q": f"{query} when:2d", "hl": "ko", "gl": "KR", "ceid": "KR:ko"})
+    root = ET.fromstring(http_get("https://news.google.com/rss/search?" + qs))
+    found = []
+    for it in root.iter("item"):
+        source = it.find("source")
+        press = (source.text or "").strip() if source is not None else ""
+        title = clean(it.findtext("title"))
+        suffix = " - " + press
+        while press and title.endswith(suffix):
+            title = title[: -len(suffix)].rstrip()
+        pub = parse_time(it.findtext("pubDate"))
+        if pub is None or pub < since:
+            continue
+        link = it.findtext("link") or ""
+        found.append({"title": title, "desc": "", "url": link, "orig": link, "pub": pub, "press": press or None})
+    return found
+
+
+def make_id(article):
+    orig = article["orig"]
+    if orig and "news.google.com" not in orig:
+        key = orig
+    else:
+        key = f'{article["press"]}|{article["title"]}'
+    return hashlib.md5(key.encode("utf-8")).hexdigest()[:12]
+
+
+def pick_naver_api(query, since, client_id, client_secret, limit):
+    """첫 검색어로 API HUB 주소를 먼저 시험하고, 키가 맞지 않으면 옛 개발자센터 주소를 시험한다."""
+    for api in ("hub", "openapi"):
+        try:
+            return api, fetch_naver(query, since, client_id, client_secret, limit, api)
+        except urllib.error.HTTPError as e:
+            if e.code not in (401, 403):
+                raise
+            print(f"  · {api} 주소에서 키를 받지 않음({e.code})")
+    sys.exit("네이버 API 키가 맞지 않습니다(401/403). NAVER API HUB의 Client ID와 Client Secret을 다시 확인해 주세요.")
+
+
+def collect(source, queries, settings, press_map, since):
+    client_id = os.environ.get("NAVER_CLIENT_ID", "")
+    client_secret = os.environ.get("NAVER_CLIENT_SECRET", "")
+    if source == "naver" and not (client_id and client_secret):
+        sys.exit("NAVER_CLIENT_ID / NAVER_CLIENT_SECRET 이 없습니다. .env 파일이나 GitHub Secrets에 넣어 주세요.\n"
+                 "키 없이 시험하려면: python collect.py --source rss")
+    limit = settings["검색어 하나당 최대 기사 수"]
+    api = None
+    articles, failed = {}, []
+    for n, query in enumerate(queries, 1):
+        try:
+            if source == "naver" and api is None:
+                api, items = pick_naver_api(query, since, client_id, client_secret, limit)
+                print(f"  네이버 API 주소: {NAVER_APIS[api][0]}")
+            elif source == "naver":
+                items = fetch_naver(query, since, client_id, client_secret, limit, api)
+            else:
+                items = fetch_google_rss(query, since)
+                time.sleep(0.4)
+        except Exception as e:  # 검색어 하나가 실패해도 나머지는 계속한다
+            failed.append(query)
+            print(f"  ! '{query}' 검색 실패: {e}")
+            continue
+        for a in items:
+            if not a["title"]:
+                continue
+            if not a["press"]:
+                a["press"] = press_of(a["orig"] or a["url"], press_map)
+            aid = make_id(a)
+            if aid in articles:
+                if query not in articles[aid]["q"]:
+                    articles[aid]["q"].append(query)
+                continue
+            a["q"] = [query]
+            articles[aid] = a
+        if n % 20 == 0:
+            print(f"  검색어 {n}/{len(queries)} · 기사 {len(articles)}건")
+    return articles, failed
+
+
+# ───────────────────────── 지역 찾기 ─────────────────────────
+
+NOT_AFTER = r"(?<![가-힣0-9])"  # 앞에 한글·숫자가 붙어 있으면 다른 낱말의 일부로 본다
+
+
+class RegionMatcher:
+    def __init__(self, cfg):
+        self.exclude = cfg.get("제외할 말", [])
+        self.word_map = defaultdict(list)  # 낱말 -> [(지역, 곳, 함께 나와야 하는 말)]
+        for gu, words in cfg["서울"].items():
+            for w in words:
+                self.word_map[w].append(("서울", gu, None))
+        for w in cfg.get("서울 전체", []):
+            self.word_map[w].append(("서울", None, None))
+        for name, words in cfg["신도시"].items():
+            for w in words:
+                self.word_map[w].append(("신도시", name, None))
+        for city, words in cfg["경기·인천"].items():
+            for w in words:
+                self.word_map[w].append(("경기·인천", city, None))
+        for w in cfg.get("경기·인천 전체", []):
+            self.word_map[w].append(("경기·인천", None, None))
+        for w in cfg.get("수도권 전체", []):
+            self.word_map[w].append(("수도권", None, None))
+        for w, rule in cfg.get("조건이 붙는 말", {}).items():
+            self.word_map[w].append((rule["지역"], rule.get("곳"), rule.get("함께 나와야 하는 말")))
+        self.rx = self._compile(self.word_map)
+        self.noncap_rx = self._compile(cfg.get("비수도권", []))
+
+    @staticmethod
+    def _compile(words):
+        words = sorted(words, key=len, reverse=True)
+        if not words:
+            return None
+        return re.compile(NOT_AFTER + "(" + "|".join(map(re.escape, words)) + ")")
+
+    def find(self, text):
+        """지역별 횟수, 곳별 횟수, 비수도권 말이 있는지, 가장 먼저 나온 지역(대표 지역)을 돌려준다."""
+        for w in self.exclude:
+            text = text.replace(w, " ")
+        areas, places, first = Counter(), Counter(), None
+        for m in self.rx.finditer(text):
+            found = [(area, place) for area, place, need in self.word_map[m.group(1)]
+                     if not need or any(x in text for x in need)]
+            for area, place in found:
+                areas[area] += 1
+                if place:
+                    places[(area, place)] += 1
+            if first is None:
+                first = next((a for a in AREA_ORDER[:3] if any(a == f for f, _ in found)), None)
+        noncap = bool(self.noncap_rx and self.noncap_rx.search(text))
+        return areas, places, noncap, first
+
+
+def place_label(area, place):
+    return f"서울 {place}" if area == "서울" else place
+
+
+# ───────────────────────── 분야 나누기 ─────────────────────────
+
+class Classifier:
+    def __init__(self, cfg):
+        self.exclude = cfg.get("제외할 말", [])
+        self.cats = [k for k in cfg if not k.startswith("_") and k != "제외할 말"]
+        self.word_map = defaultdict(list)
+        for cat in self.cats:
+            for w in cfg[cat]:
+                self.word_map[w].append(cat)
+        parts = []
+        for w in sorted(self.word_map, key=len, reverse=True):
+            esc = re.escape(w)
+            if re.fullmatch(r"[A-Za-z0-9 ]+", w):  # 영어 약어는 다른 영어 낱말 안에서 잡히지 않게
+                esc = r"(?<![A-Za-z])" + esc + r"(?![A-Za-z])"
+            parts.append(esc)
+        self.rx = re.compile("|".join(parts))
+
+    def _hits(self, text):
+        for w in self.exclude:
+            text = text.replace(w, " ")
+        per_cat = defaultdict(set)
+        for m in self.rx.finditer(text):
+            for cat in self.word_map[m.group(0)]:
+                per_cat[cat].add(m.group(0))
+        return per_cat
+
+    def classify(self, title, desc):
+        in_title, in_desc = self._hits(title), self._hits(desc)
+        scored = []
+        for order, cat in enumerate(self.cats):
+            t = in_title.get(cat, set())
+            d = in_desc.get(cat, set()) - t
+            score = 2 * len(t) + len(d)
+            if score:
+                scored.append((score, len(t), -order, cat))
+        if not scored:
+            return None, []
+        scored.sort(reverse=True)
+        return scored[0][3], [c for s, _, _, c in scored[1:] if s >= 2]
+
+
+# ───────────────────────── 이슈 묶기 ─────────────────────────
+
+JOSA = sorted([
+    "은", "는", "이", "가", "을", "를", "의", "에", "와", "과", "도", "만", "로", "으로", "에서", "에게",
+    "까지", "부터", "보다", "처럼", "이나", "라도", "에는", "에도", "로는", "으론", "으로는", "에서는",
+    "에서도", "까지는", "이라", "라는", "이라는", "했다", "한다", "된다", "됐다", "이다", "에선", "서도",
+], key=len, reverse=True)
+SPLIT_RX = re.compile(r"[\s\"'“”‘’`·•…,.!?:;~/|\\\-–—=+*&%^#@()\[\]{}<>「」『』《》〈〉【】]+")
+BRACKET_RX = re.compile(r"[\[(【〈<][^\])】〉>]{1,12}[\])】〉>]")
+NUMBER_OK_RX = re.compile(r"(구역|단지|지구|차|호선|층|공구|블록|동)$")
+
+
+def raw_words(title):
+    """제목을 띄어쓰기·문장부호로 자른다. 맨 앞 [단독] 같은 머리말과 (종합) 같은 괄호 말은 뺀다."""
+    text = HEAD_RX.sub(" ", title)
+    text = BRACKET_RX.sub(" ", text)
+    text = re.sub(r"(?<=\d)[.,](?=\d)", "", text)
+    return [w for w in SPLIT_RX.split(text) if w]
+
+
+def strip_josa(word, vocab):
+    """조사를 뗀다. 두 글자 이상 조사(에서, 까지 등)는 늘 떼고, 한 글자 조사(은·는·이·가 등)는
+    뗀 말이 그날 제목에 따로 쓰인 적이 있을 때만 뗀다. 그래서 '인허가'는 '인허'로 잘리지 않는다."""
+    for j in JOSA:
+        if word.endswith(j):
+            stem = word[: -len(j)]
+            if len(stem) >= 2 and (len(j) >= 2 or stem in vocab):
+                return stem
+    return word
+
+
+def title_tokens(words, vocab, drop):
+    """잘라 낸 말에서 조사를 떼고, 버릴 말과 숫자만 있는 말(4.6억 등)을 걸러 낸다."""
+    out = []
+    for w in words:
+        w = strip_josa(w, vocab)
+        if w.isascii():
+            w = w.upper()
+        if len(w) < 2 or w in drop:
+            continue
+        if w[0].isdigit() and not NUMBER_OK_RX.search(w):
+            continue
+        out.append(w)
+    return list(dict.fromkeys(out))
+
+
+def core_of(cluster):
+    """이슈의 핵심어: 묶인 기사의 30% 이상(최소 2건)에 나온 낱말."""
+    size = len(cluster["ids"])
+    if cluster.get("core_size") == size:
+        return cluster["core"]
+    if size <= 2:
+        core = set(cluster["cnt"])
+    else:
+        need = max(2, math.ceil(size * 0.3))
+        core = {t for t, k in cluster["cnt"].items() if k >= need} or {t for t, _ in cluster["cnt"].most_common(3)}
+    cluster["core"], cluster["core_size"] = core, size
+    return core
+
+
+def make_issues(articles, cfg):
+    drop, weak = set(cfg["버릴 말"]), set(cfg["약한 말"])
+    n = len(articles)
+    if not n:
+        return []
+    raws = [raw_words(a["t"]) for a in articles]
+    vocab = {w for ws in raws for w in ws}
+    toks = [title_tokens(ws, vocab, drop) for ws in raws]
+    df = Counter()
+    for ts in toks:
+        df.update(ts)
+    common_cut = max(6, int(n * cfg["흔한 말 비율"]))
+
+    def weight(t):
+        return math.log((n + 1) / df[t])
+
+    def is_strong(t):
+        return t not in weak and 2 <= df[t] <= common_cut
+
+    clusters, by_token = [], defaultdict(set)
+    for i in sorted(range(n), key=lambda k: articles[k]["at"]):
+        strong = [t for t in toks[i] if is_strong(t)]
+        if len(strong) < 2:
+            continue  # 묶을 근거가 모자란 기사는 이슈에 넣지 않는다
+        hits = Counter(ci for t in strong for ci in by_token[t])
+        best, best_score = None, 0.0
+        for ci, k in hits.items():
+            if k < 2:
+                continue
+            shared = [t for t in strong if t in core_of(clusters[ci])]
+            if len(shared) < 2:
+                continue
+            score = sum(weight(t) for t in shared)
+            if score > best_score:
+                best, best_score = ci, score
+        if best is None or best_score < cfg["묶는 점수"]:
+            clusters.append({"ids": [], "cnt": Counter()})
+            best = len(clusters) - 1
+        clusters[best]["ids"].append(i)
+        clusters[best]["cnt"].update(strong)
+        for t in strong:
+            by_token[t].add(best)
+
+    # 핵심어 5개 중 3개 이상, 또는 무게가 큰 핵심어 2개가 겹치는 이슈끼리 한 번 더 합친다
+    live = [c for c in clusters if len(c["ids"]) >= 2]
+    merged = True
+    while merged:
+        merged = False
+        tops = [{t for t, _ in c["cnt"].most_common(5)} for c in live]
+        for x in range(len(live)):
+            for y in range(x + 1, len(live)):
+                shared = tops[x] & tops[y]
+                if len(shared) >= 3 or (len(shared) == 2 and sum(map(weight, shared)) >= cfg["묶는 점수"] * 1.4):
+                    live[x]["ids"] += live[y]["ids"]
+                    live[x]["cnt"] += live[y]["cnt"]
+                    live[x].pop("core_size", None)
+                    del live[y]
+                    merged = True
+                    break
+            if merged:
+                break
+
+    issues = []
+    for c in live:
+        ids = c["ids"]
+        presses = {articles[i]["p"] for i in ids}
+        if len(presses) < cfg["이슈로 보여줄 최소 언론사 수"]:
+            continue
+        core = core_of(c)
+
+        def rep_key(i):
+            a = articles[i]
+            return (0 if a.get("k") else 1, sum(weight(t) for t in toks[i] if t in core), -abs(len(a["t"]) - 32))
+
+        rep = articles[max(ids, key=rep_key)]
+        members = sorted(ids, key=lambda i: articles[i]["at"], reverse=True)
+        places = Counter(p for i in ids for p in articles[i]["r"][:2])
+        issues.append({
+            "t": rep["t"], "u": rep["u"], "p": rep["p"],
+            "keys": [t for t, _ in c["cnt"].most_common(12) if t in core][:5],
+            "n": len(ids), "np": len(presses),
+            "c": Counter(articles[i]["c"] for i in ids).most_common(1)[0][0],
+            "a": Counter(articles[i]["a"] for i in ids).most_common(1)[0][0],
+            "r": [p for p, _ in places.most_common(3)],
+            "first": min(articles[i]["at"] for i in ids),
+            "last": max(articles[i]["at"] for i in ids),
+            "ids": [articles[i]["id"] for i in members],
+            "_core": core,
+        })
+    issues.sort(key=lambda x: (-x["np"], -x["n"]))
+    issues = issues[: cfg["이슈 최대 개수"]]
+
+    # 이슈에 들어가지 못한 사설·칼럼도 핵심어가 2개 이상 겹치면 그 이슈에 붙인다
+    placed = {aid for it in issues for aid in it["ids"]}
+    for i, a in enumerate(articles):
+        if not a.get("k") or a["id"] in placed:
+            continue
+        best, best_shared = None, 1
+        for it in issues:
+            shared = len(set(toks[i]) & it["_core"])
+            if shared > best_shared:
+                best, best_shared = it, shared
+        if best:
+            best["ids"].append(a["id"])
+    by_id = {a["id"]: a for a in articles}
+    for rank, it in enumerate(issues, 1):
+        it["rank"] = rank
+        it["op"] = sum(1 for aid in it["ids"] if by_id[aid].get("k"))
+        del it["_core"]
+    return issues
+
+
+# ───────────────────────── 하루치 정리 ─────────────────────────
+
+class Context:
+    def __init__(self):
+        self.settings = load_config("settings.json")
+        self.regions = RegionMatcher(load_config("regions.json"))
+        self.classifier = Classifier(load_config("categories.json"))
+        press = load_config("press.json")
+        self.press_map = press["언론사"]
+        self.blocked_press = set(press.get("뺄 언론사", []))
+
+
+def process_day(date, records, ctx, updated):
+    settings = ctx.settings
+    kept, seen, dropped = [], set(), Counter()
+    for r in sorted(records.values(), key=lambda x: x["at"]):
+        title, desc = r["t"], r.get("d") or ""
+        if is_unwanted(title, settings["버릴 머리말"]):
+            dropped["사진·부고 등"] += 1
+            continue
+        if r["p"] in ctx.blocked_press:
+            dropped["연예·스포츠 매체"] += 1
+            continue
+        same = (r["p"], re.sub(r"\W", "", title)[:40])
+        if same in seen:
+            dropped["같은 기사"] += 1
+            continue
+        areas, places, noncap, first = ctx.regions.find(f"{title} {desc}")
+        if noncap and not areas:
+            dropped["비수도권"] += 1
+            continue
+        cat, others = ctx.classifier.classify(title, desc)
+        if not cat:
+            dropped["도시 분야 아님"] += 1
+            continue
+        seen.add(same)
+        rec = {k: r.get(k) for k in RAW_KEYS}
+        rec.update({
+            "c": cat,
+            "c2": others,
+            "a": first or ("수도권" if areas.get("수도권") else NATIONAL),
+            "ar": [x for x in AREA_ORDER if areas.get(x)],
+            "r": [place_label(a, p) for (a, p), _ in places.most_common(4)],
+            "k": article_kind(title, settings["칼럼 머리말"]),
+        })
+        kept.append(rec)
+    issues = make_issues(kept, settings["이슈 묶기"])
+    kept.sort(key=lambda x: x["at"], reverse=True)
+    return {
+        "date": date,
+        "updated": updated,
+        "count": len(kept),
+        "dropped": dict(dropped),
+        "categories": ctx.classifier.cats,
+        "issues": issues,
+        "articles": kept,
+    }
+
+
+# ───────────────────────── 저장 ─────────────────────────
+
+def day_path(date):
+    return os.path.join(DATA_DIR, f"{date}.json")
+
+
+def save_json(path, data):
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, separators=(",", ":"))
+    os.replace(tmp, path)
+
+
+def load_day(date):
+    path = day_path(date)
+    if not os.path.exists(path):
+        return {}
+    with open(path, encoding="utf-8") as f:
+        data = json.load(f)
+    return {a["id"]: {k: a.get(k) for k in RAW_KEYS} for a in data.get("articles", [])}
+
+
+def load_index():
+    """날짜 목록과 마지막으로 수집에 성공한 시각."""
+    path = os.path.join(DATA_DIR, "index.json")
+    if not os.path.exists(path):
+        return {}, None
+    with open(path, encoding="utf-8") as f:
+        data = json.load(f)
+    last_run = None
+    if data.get("last_run"):
+        try:
+            last_run = datetime.fromisoformat(data["last_run"])
+        except ValueError:
+            pass
+    return {x["d"]: x for x in data.get("dates", [])}, last_run
+
+
+def write_index(index, keep_days, now, last_run):
+    if keep_days:
+        cutoff = (now - timedelta(days=keep_days)).strftime("%Y-%m-%d")
+        for d in [d for d in index if d < cutoff]:
+            if os.path.exists(day_path(d)):
+                os.remove(day_path(d))
+            del index[d]
+    for d in list(index):  # 파일이 없어진 날짜는 목록에서도 뺀다
+        if not os.path.exists(day_path(d)):
+            del index[d]
+    dates = sorted(index.values(), key=lambda x: x["d"], reverse=True)
+    save_json(os.path.join(DATA_DIR, "index.json"), {
+        "latest": dates[0]["d"] if dates else None,
+        "last_run": last_run.isoformat(timespec="minutes") if last_run else None,
+        "dates": dates,
+    })
+
+
+def to_record(aid, a, max_desc):
+    desc = a["desc"]
+    if len(desc) > max_desc:
+        desc = desc[:max_desc].rstrip() + "…"
+    return {"id": aid, "t": a["title"], "d": desc, "u": a["url"], "o": a["orig"], "p": a["press"],
+            "at": a["pub"].strftime("%Y-%m-%dT%H:%M"), "q": a["q"]}
+
+
+def report(day):
+    arts = day["articles"]
+    print(f"\n[{day['date']}] 실은 기사 {day['count']}건 · 뺀 기사 {day['dropped']}")
+    print("  분야:", dict(Counter(a["c"] for a in arts).most_common()))
+    print("  지역:", dict(Counter(a["a"] for a in arts).most_common()))
+    print("  사설·칼럼:", dict(Counter(a["k"] for a in arts if a["k"])))
+    for it in day["issues"][:10]:
+        print(f"  {it['rank']:>2}. 언론사 {it['np']:>2}곳·기사 {it['n']:>3}건 [{it['c']}] {it['t'][:60]}  #{' #'.join(it['keys'])}")
+
+
+# ───────────────────────── 실행 ─────────────────────────
+
+def main():
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+    except (AttributeError, ValueError):
+        pass
+    parser = argparse.ArgumentParser(description="Urban Scale 수집기")
+    parser.add_argument("--source", choices=["naver", "rss"], default="naver",
+                        help="naver: 네이버 뉴스 검색 API (기본), rss: 키 없이 시험하는 구글 뉴스 RSS")
+    parser.add_argument("--reprocess", action="store_true", help="새로 모으지 않고 저장된 오늘·어제 기사만 다시 분류")
+    args = parser.parse_args()
+
+    load_env_file()
+    ctx = Context()
+    now = datetime.now(KST)
+    updated = now.strftime("%Y-%m-%dT%H:%M")
+    os.makedirs(DATA_DIR, exist_ok=True)
+    index, last_run = load_index()
+
+    touched = {}
+    if args.reprocess:
+        for k in (1, 0):
+            d = (now - timedelta(days=k)).strftime("%Y-%m-%d")
+            records = load_day(d)
+            if records:
+                touched[d] = records
+    else:
+        groups = load_config("queries.json")["검색어"]
+        queries = list(dict.fromkeys(q for qs in groups.values() for q in qs))
+        # 지난번 수집 1시간 전부터만 받는다(호출 수를 줄이려고). 처음이거나 오래 쉬었으면 '최근 몇 시간'만큼 받는다.
+        since = now - timedelta(hours=ctx.settings["최근 몇 시간 기사를 모을지"])
+        if last_run and args.source == "naver":
+            since = max(since, last_run - timedelta(hours=1))
+        print(f"검색어 {len(queries)}개로 수집 시작 ({'네이버 API' if args.source == 'naver' else '구글 뉴스 RSS 시험'}) · "
+              f"{since.strftime('%m-%d %H:%M')} 이후 기사")
+        fetched, failed = collect(args.source, queries, ctx.settings, ctx.press_map, since)
+        if len(failed) == len(queries):
+            sys.exit("모든 검색이 실패했습니다. API 키와 인터넷 연결을 확인해 주세요.")
+        if args.source == "naver" and len(failed) <= len(queries) * 0.1:
+            last_run = now  # 거의 다 성공했을 때만 다음 수집의 기준 시각으로 삼는다
+        by_date = defaultdict(dict)
+        for aid, a in fetched.items():
+            by_date[a["pub"].strftime("%Y-%m-%d")][aid] = to_record(aid, a, ctx.settings["요약 최대 글자 수"])
+        for d, new in by_date.items():
+            records = load_day(d)
+            for aid, rec in new.items():
+                if aid in records:
+                    records[aid]["q"] = sorted(set(records[aid].get("q") or []) | set(rec["q"]))
+                else:
+                    records[aid] = rec
+            touched[d] = records
+        print(f"받은 기사 {len(fetched)}건 (실패한 검색어 {len(failed)}개)")
+
+    for d in sorted(touched):
+        day = process_day(d, touched[d], ctx, updated)
+        save_json(day_path(d), day)
+        index[d] = {"d": d, "n": day["count"], "u": updated}
+        report(day)
+    write_index(index, ctx.settings.get("보관 일수", 0), now, last_run)
+    print("\n저장 완료:", os.path.relpath(DATA_DIR, ROOT))
+
+
+if __name__ == "__main__":
+    main()
