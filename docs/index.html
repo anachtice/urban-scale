@@ -1051,7 +1051,8 @@ a.btn:hover { text-decoration: none; }
       return `<line x1="${a.px.toFixed(1)}" y1="${a.py.toFixed(1)}" x2="${b.px.toFixed(1)}" y2="${b.py.toFixed(1)}" stroke-width="${(0.6 + 2.6 * l.w).toFixed(2)}"/>`;
     }).join('');
     // 라벨 자리: 원들이 차지한 곳을 먼저 막고, 큰 키워드부터 아래·위·오른쪽·왼쪽 순으로 빈자리를 찾는다. 자리가 없으면 숨김(원에 마우스를 올리면 보임)
-    const boxes = P.map((n) => ({ x1: n.px - n.r, x2: n.px + n.r, y1: n.py - n.r, y2: n.py + n.r }));
+    // 다른 원은 안쪽 55%만 피한다. 글자에 흰 테두리가 있어 원 가장자리와 겹쳐도 읽힌다
+    const boxes = P.map((n) => ({ x1: n.px - n.r * 0.55, x2: n.px + n.r * 0.55, y1: n.py - n.r * 0.55, y2: n.py + n.r * 0.55 }));
     const hit = (b) => boxes.some((o) => b.x1 < o.x2 && b.x2 > o.x1 && b.y1 < o.y2 && b.y2 > o.y1);
     const labels = new Array(P.length).fill(null);
     P.map((_, i) => i).sort((a, b) => P[b].n - P[a].n).forEach((i) => {

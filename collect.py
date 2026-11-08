@@ -696,7 +696,7 @@ PAPERS_PATH = os.path.join(DATA_DIR, "papers.json")
 PAPERS_LATEST_PATH = os.path.join(DATA_DIR, "papers-latest.json")
 PAPERS_FORMAT = 3  # 저장 내용이 바뀌면 숫자를 올린다(올리면 다음 실행에서 바로 다시 받는다)
 TRENDS_PATH = os.path.join(DATA_DIR, "trends.json")
-TRENDS_FORMAT = 1
+TRENDS_FORMAT = 2
 
 
 def abstract_text(inverted):
@@ -892,9 +892,14 @@ def force_layout(n, weights, iters=600, seed=11):
             pos[i][0] += disp[i][0] / length * step
             pos[i][1] += disp[i][1] / length * step
         temp = max(temp * 0.985, 0.002)
-    xs, ys = [p[0] for p in pos], [p[1] for p in pos]
-    span_x, span_y = (max(xs) - min(xs)) or 1, (max(ys) - min(ys)) or 1
-    return [[0.07 + 0.86 * (x - min(xs)) / span_x, 0.08 + 0.84 * (y - min(ys)) / span_y] for x, y in zip(xs, ys)]
+    def spread(vals):
+        """가운데에 몰린 키워드를 고르게 편다: 원래 위치와 순위 위치를 반씩 섞는다(앞뒤 순서는 그대로)."""
+        lo, hi = min(vals), max(vals)
+        rank = {i: r / max(n - 1, 1) for r, i in enumerate(sorted(range(n), key=lambda i: vals[i]))}
+        return [0.5 * (v - lo) / ((hi - lo) or 1) + 0.5 * rank[i] for i, v in enumerate(vals)]
+
+    xs, ys = spread([p[0] for p in pos]), spread([p[1] for p in pos])
+    return [[0.07 + 0.86 * x, 0.08 + 0.84 * y] for x, y in zip(xs, ys)]
 
 
 def trend_scope(sc, journals, windows, n_map, key, now):
