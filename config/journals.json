@@ -54,17 +54,17 @@
     {"이름": "Tunnelling and Underground Space Technology", "약칭": "TUST", "분야": "건축·건설", "구분": "해외", "ISSN": "0886-7798", "OpenAlex ID": "S139192911", "사용": false}
   ],
   "동향": {
-    "_설명": "연구 동향 설정. 최근 1년(두 달 전까지)과 그 전 1년의 주제·키워드 논문 수를 OpenAlex에서 세어 비교한다. '기준: 학술지'는 위 목록의 학술지(분야를 적으면 그 분야만), 'OpenAlex 세부분야' 번호는 3322 Urban Studies, 3305 Geography·Planning·Development, 2216 Architecture, 2215 Building and Construction. 'OpenAlex 키워드'를 넣으면 그 키워드가 붙은 논문만 센다.",
+    "_설명": "연구 동향 설정. 최근 1년(두 달 전까지)과 그 전 1년의 주제·키워드 논문 수를 OpenAlex에서 세어 비교한다. '기준: 학술지'는 위 목록의 학술지(분야를 적으면 그 분야만), 'OpenAlex 세부분야' 번호는 3322 Urban Studies, 3305 Geography·Planning·Development, 2216 Architecture, 2215 Building and Construction. 'OpenAlex 키워드'를 넣으면 그 키워드가 붙은 논문만 센다. '핵심 학술지만'을 true로 두면 OpenAlex가 핵심(core)으로 분류한 학술지에 실린 논문만 센다(자료 저장소·학회 초록·책 제외).",
     "갱신 간격(일)": 7,
     "지도에 넣을 키워드 수": 30,
     "범위": [
       {"이름": "관심 학술지", "기준": "학술지"},
       {"이름": "도시계획 학술지", "기준": "학술지", "분야": "도시계획"},
-      {"이름": "도시·계획 분야 전체", "OpenAlex 세부분야": ["3322", "3305"]},
-      {"이름": "도시 × 머신러닝", "OpenAlex 세부분야": ["3322", "3305"],
+      {"이름": "도시·계획 분야 전체", "OpenAlex 세부분야": ["3322", "3305"], "핵심 학술지만": true},
+      {"이름": "도시 × 머신러닝", "OpenAlex 세부분야": ["3322", "3305"], "핵심 학술지만": true,
        "OpenAlex 키워드": ["machine-learning", "deep-learning", "artificial-intelligence", "random-forest", "shap", "predictive-analytics", "geospatial-artificial-intelligence"]},
-      {"이름": "건축 분야 전체", "OpenAlex 세부분야": ["2216"]},
-      {"이름": "건설 분야 전체", "OpenAlex 세부분야": ["2215"]}
+      {"이름": "건축 분야 전체", "OpenAlex 세부분야": ["2216"], "핵심 학술지만": true},
+      {"이름": "건설 분야 전체", "OpenAlex 세부분야": ["2215"], "핵심 학술지만": true}
     ]
   }
 }

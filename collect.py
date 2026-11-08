@@ -572,6 +572,8 @@ def process_day(date, records, ctx, updated):
         if is_unwanted(title, settings["버릴 머리말"]):
             dropped["사진·부고 등"] += 1
             continue
+        if r.get("o") and "news.google.com" not in r["o"]:  # 언론사 이름 사전을 고치면 이미 모은 기사에도 바로 반영
+            r["p"] = press_of(r["o"], ctx.press_map)
         if r["p"] in ctx.blocked_press:
             dropped["연예·스포츠 매체"] += 1
             continue
@@ -583,7 +585,8 @@ def process_day(date, records, ctx, updated):
             dropped["같은 기사"] += 1
             continue
         areas, places, noncap, first = ctx.regions.find(f"{title} {desc}")
-        if noncap and not areas:
+        kind = article_kind(title, settings["칼럼 머리말"])
+        if noncap and not areas and not kind:  # 사설·칼럼은 지방 사례로 정책을 논하는 경우가 많아 지역으로 거르지 않는다
             dropped["비수도권"] += 1
             continue
         cat, others, score = ctx.classifier.classify(title, desc)
@@ -598,7 +601,7 @@ def process_day(date, records, ctx, updated):
             "a": first or ("수도권" if areas.get("수도권") else NATIONAL),
             "ar": [x for x in AREA_ORDER if areas.get(x)],
             "r": [place_label(a, p) for (a, p), _ in places.most_common(4)],
-            "k": article_kind(title, settings["칼럼 머리말"]),
+            "k": kind,
         })
         kept.append(rec)
     issues = make_issues(kept, settings["이슈 묶기"])
@@ -686,6 +689,83 @@ def report(day):
     print("  사설·칼럼:", dict(Counter(a["k"] for a in arts if a["k"])))
     for it in day["issues"][:10]:
         print(f"  {it['rank']:>2}. 언론사 {it['np']:>2}곳·기사 {it['n']:>3}건 [{it['c']}] {it['t'][:60]}  #{' #'.join(it['keys'])}")
+
+
+# ───────────────────────── 용어 사전·관심 필자 ─────────────────────────
+
+GLOSSARY_PATH = os.path.join(DATA_DIR, "glossary.json")
+PEOPLE_PATH = os.path.join(DATA_DIR, "people.json")
+
+
+def publish_glossary():
+    """config/glossary.json 을 사이트가 읽는 docs/data/glossary.json 으로 옮긴다."""
+    try:
+        save_json(GLOSSARY_PATH, load_config("glossary.json"))
+    except FileNotFoundError:
+        pass
+
+
+def update_people(now, last_run, ctx, source):
+    """config/people.json 의 필자·인물이 나온 칼럼·기사를 모은다. 지역·분야로 거르지 않는다.
+    처음 넣은 사람은 '처음 거슬러 받을 날 수'만큼 지난 기사를 한 번 받는다."""
+    try:
+        cfg = load_config("people.json")
+    except FileNotFoundError:
+        return
+    people = cfg.get("필자") or []
+    client_id = os.environ.get("NAVER_CLIENT_ID", "")
+    client_secret = os.environ.get("NAVER_CLIENT_SECRET", "")
+    if not people or (source == "naver" and not (client_id and client_secret)):
+        return
+    old = {}
+    if os.path.exists(PEOPLE_PATH):
+        with open(PEOPLE_PATH, encoding="utf-8") as f:
+            old = {p["name"]: p for p in json.load(f).get("people", [])}
+    back_days = cfg.get("처음 거슬러 받을 날 수", 365)
+    cap = cfg.get("필자당 최대 보관 수", 300)
+    max_desc = ctx.settings["요약 최대 글자 수"]
+    out, api = [], None
+    for person in people:
+        name = person["이름"]
+        prev = old.get(name, {})
+        first_time = not prev.get("backfilled")
+        if first_time:
+            since = now - timedelta(days=back_days)
+        else:
+            since = max(now - timedelta(hours=ctx.settings["최근 몇 시간 기사를 모을지"]), (last_run or now) - timedelta(hours=1))
+        items = {x["id"]: x for x in prev.get("items", [])}
+        ok = True
+        for q in person.get("검색어") or [name]:
+            try:
+                if source == "naver" and api is None:
+                    api, found = pick_naver_api(q, since, client_id, client_secret, 1000)
+                elif source == "naver":
+                    found = fetch_naver(q, since, client_id, client_secret, 1000, api)
+                else:
+                    found = fetch_google_rss(q, since)
+            except Exception as e:
+                print(f"  ! 관심 필자 '{name}' 검색 실패: {e}")
+                ok = False
+                continue
+            for a in found:
+                if not a["title"]:
+                    continue
+                a["press"] = a["press"] or press_of(a["orig"] or a["url"], ctx.press_map)
+                desc = a["desc"] if len(a["desc"]) <= max_desc else a["desc"][:max_desc].rstrip() + "…"
+                items.setdefault(make_id(a), {
+                    "id": make_id(a), "t": a["title"], "d": desc, "u": a["url"], "p": a["press"],
+                    "at": a["pub"].strftime("%Y-%m-%dT%H:%M"), "k": article_kind(a["title"], ctx.settings["칼럼 머리말"]),
+                })
+        seen, kept = set(), []
+        for x in sorted(items.values(), key=lambda x: x["at"], reverse=True):  # 같은 언론사·같은 제목은 하나만
+            key = (x["p"], re.sub(r"\W", "", x["t"])[:40])
+            if key not in seen:
+                seen.add(key)
+                kept.append(x)
+        out.append({"name": name, "intro": person.get("소개", ""),
+                     "backfilled": bool(prev.get("backfilled")) or (ok and source == "naver"), "items": kept[:cap]})
+        print(f"  관심 필자 '{name}': {len(kept)}건" + (" (지난 기사 거슬러 받음)" if first_time and ok and source == "naver" else ""))
+    save_json(PEOPLE_PATH, {"updated": now.isoformat(timespec="minutes"), "people": out})
 
 
 # ───────────────────────── 학술 논문 (OpenAlex) ─────────────────────────
@@ -910,6 +990,8 @@ def trend_scope(sc, journals, windows, n_map, key, now):
         base = "primary_location.source.id:" + "|".join(j["OpenAlex ID"] for j in pool)
     else:
         base = "primary_topic.subfield.id:" + "|".join(sc.get("OpenAlex 세부분야", []))
+    if sc.get("핵심 학술지만"):  # 자료 저장소·학회 초록·책을 빼고 핵심 학술지 논문만
+        base += ",primary_location.source.is_core:true,primary_location.source.type:journal"
     scope_kw = sc.get("OpenAlex 키워드") or []
     if scope_kw:
         base += ",keywords.id:" + "|".join(scope_kw)
@@ -1076,6 +1158,8 @@ def main():
         index[d] = {"d": d, "n": day["count"], "u": updated}
         report(day)
     write_index(index, ctx.settings.get("보관 일수", 0), now, last_run)
+    publish_glossary()
+    update_people(now, last_run, ctx, args.source)
     update_papers(now, force=args.papers)
     update_trends(now, force=args.trends)
     print("\n저장 완료:", os.path.relpath(DATA_DIR, ROOT))

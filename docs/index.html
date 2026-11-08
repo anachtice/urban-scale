@@ -185,6 +185,28 @@ a.btn:hover { text-decoration: none; }
 .down { color: #2f5d9a; }
 @media (prefers-color-scheme: dark) { .up { color: #f0935f; } .down { color: #7fa8e0; } }
 
+/* 용어·개념 */
+.termgrid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+@media (max-width: 880px) { .termgrid { grid-template-columns: minmax(0, 1fr); } }
+.term { border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; background: var(--panel); }
+.term h3 { font-size: 15.5px; margin: 0 0 6px; display: flex; align-items: center; gap: 6px 10px; flex-wrap: wrap; }
+.alias { font-size: 12.5px; font-weight: 500; color: var(--ink-2); }
+.term .def { font-size: 14px; margin: 4px 0; }
+.term .more { font-size: 13px; color: var(--ink-2); margin: 4px 0; }
+.term .law { font-size: 12.5px; color: var(--ink-2); margin-top: 4px; }
+.term .rel { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 8px; }
+.term .rel button { font-size: 12px; border: 1px solid var(--line); background: var(--soft); border-radius: 999px; padding: 1px 9px; cursor: pointer; }
+.term .acts { display: flex; gap: 6px; margin-top: 10px; flex-wrap: wrap; }
+.term.known { background: var(--soft); }
+.flash { border: 1px solid var(--line); border-radius: 14px; padding: 28px 22px; margin: 14px 0 8px; text-align: center; min-height: 240px; display: grid; align-content: center; gap: 10px; }
+.flash .word { font-size: 26px; font-weight: 800; letter-spacing: -0.01em; }
+.flash .def { font-size: 15.5px; max-width: 640px; margin: 4px auto 0; }
+.flash .more { font-size: 13.5px; color: var(--ink-2); max-width: 640px; margin: 0 auto; }
+.flash .acts { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; margin-top: 8px; }
+.people { border-bottom: 1px solid var(--line); padding-bottom: 14px; margin-bottom: 14px; }
+.peoplehead { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; margin-bottom: 6px; }
+.pname { font-weight: 700; margin: 4px 0; }
+
 /* 수집 기준 */
 .about h3 { font-size: 15px; margin: 18px 0 6px; }
 .about h3:first-child { margin-top: 0; }
@@ -218,6 +240,7 @@ a.btn:hover { text-decoration: none; }
       <button role="tab" data-tab="news" aria-selected="false">기사</button>
       <button role="tab" data-tab="opinion" aria-selected="false">오피니언</button>
       <button role="tab" data-tab="papers" aria-selected="false">논문</button>
+      <button role="tab" data-tab="terms" aria-selected="false">용어·개념</button>
       <button role="tab" data-tab="note" aria-selected="false">스크랩</button>
       <button role="tab" data-tab="about" aria-selected="false">수집 기준</button>
     </nav>
@@ -283,6 +306,7 @@ a.btn:hover { text-decoration: none; }
 
   <section id="tab-opinion" hidden>
     <div class="card">
+      <div id="peopleBox"></div>
       <div class="filters">
         <div class="chips" id="opKindChips"></div>
         <div class="row">
@@ -358,6 +382,47 @@ a.btn:hover { text-decoration: none; }
     </div>
   </section>
 
+  <section id="tab-terms" hidden>
+    <div class="chips viewchips" id="termViews"></div>
+    <div id="term-today">
+      <div class="card">
+        <h2 id="termTodayTitle">기사 속 용어</h2>
+        <p class="lead" id="termTodayCount"></p>
+        <div class="termgrid" id="termTodayList"></div>
+      </div>
+    </div>
+    <div id="term-cards" hidden>
+      <div class="card">
+        <h2>카드 학습</h2>
+        <p class="lead">용어를 보고 뜻을 떠올린 뒤 확인 · '알아요'는 이 브라우저에 저장</p>
+        <div class="chips" id="cardSource"></div>
+        <div class="flash" id="flash"></div>
+        <div class="count" id="cardProgress"></div>
+      </div>
+    </div>
+    <div id="term-dict" hidden>
+      <div class="card">
+        <div class="filters">
+          <div class="chips" id="dictCats"></div>
+          <div class="row">
+            <label class="vh" for="dictQ">검색</label>
+            <input class="field" id="dictQ" type="search" placeholder="용어·뜻 검색">
+            <button class="chip" type="button" id="dictUnknown" aria-pressed="false">모르는 용어만</button>
+          </div>
+        </div>
+        <div class="count" id="dictCount"></div>
+        <div class="termgrid" id="dictList"></div>
+      </div>
+    </div>
+    <div id="term-concepts" hidden>
+      <div class="card">
+        <h2>학술 개념</h2>
+        <p class="lead">논문·연구 동향에 자주 나오는 개념 · '관련 논문 찾기' 클릭 시 논문 탭 검색</p>
+        <div class="termgrid" id="conceptList"></div>
+      </div>
+    </div>
+  </section>
+
   <section id="tab-note" hidden>
     <div class="grid">
       <div class="card">
@@ -419,6 +484,18 @@ a.btn:hover { text-decoration: none; }
         <li>키워드 지도: 원 크기 = 논문 수, 거리 = 같은 논문에 함께 붙은 정도, 색 = 비중 변화</li>
         <li>주기: 7일마다 계산</li>
       </ul>
+      <h3>용어·개념</h3>
+      <ul>
+        <li>사전: <code>config/glossary.json</code>의 도시 용어와 학술 개념(뜻·근거 법·관련 용어·문헌)</li>
+        <li>기사 속 용어: 선택한 날짜 기사 제목·요약에 나온 사전 용어를 셈. 다른 이름(예: 재초환)도 함께 셈</li>
+        <li>카드 학습·'알아요' 표시: 이 브라우저에만 저장, 백업 파일에 포함</li>
+        <li>법 개정으로 자주 바뀌는 수치(기준 금액·비율)는 사전에 넣지 않음</li>
+      </ul>
+      <h3>관심 필자</h3>
+      <ul>
+        <li><code>config/people.json</code>의 필자·인물이 나온 칼럼·인터뷰·인용 기사를 오피니언 탭 위쪽에 모음</li>
+        <li>지역·분야 거르기 없음. 처음 넣은 필자는 지난 1년 치를 한 번 거슬러 받음</li>
+      </ul>
       <h3>규칙 파일</h3>
       <table>
         <thead><tr><th>파일</th><th>내용</th></tr></thead>
@@ -428,7 +505,9 @@ a.btn:hover { text-decoration: none; }
           <tr><td><code>config/regions.json</code></td><td>지역 이름, 제외할 비수도권 지명</td></tr>
           <tr><td><code>config/press.json</code></td><td>언론사 이름, 제외할 매체</td></tr>
           <tr><td><code>config/settings.json</code></td><td>수집 시간 범위, 이슈 묶는 기준, 버릴 말</td></tr>
-          <tr><td><code>config/journals.json</code></td><td>논문을 받아 올 학술지</td></tr>
+          <tr><td><code>config/journals.json</code></td><td>논문을 받아 올 학술지, 연구 동향 범위</td></tr>
+          <tr><td><code>config/glossary.json</code></td><td>용어·개념 사전</td></tr>
+          <tr><td><code>config/people.json</code></td><td>관심 필자·인물</td></tr>
         </tbody>
       </table>
       <p class="note">규칙 파일 수정 시 오늘·어제 기사에 바로 재적용 · 검색어 변경은 다음 수집부터 반영</p>
@@ -448,7 +527,7 @@ a.btn:hover { text-decoration: none; }
   const NEWTOWN = ['1기 신도시', '2기 신도시', '3기 신도시', '신규 공공택지'];
   const NEWS_PER_PAGE = 30, OP_PER_PAGE = 15, PAPERS_PER_PAGE = 20;
   const WEEK = ['일', '월', '화', '수', '목', '금', '토'];
-  const KEY_NOTES = 'urbanscale.notes', KEY_WORDS = 'urbanscale.words';
+  const KEY_NOTES = 'urbanscale.notes', KEY_WORDS = 'urbanscale.words', KEY_KNOWN = 'urbanscale.known';
 
   const S = {
     index: null, date: null, day: null, byId: new Map(), catColor: {},
@@ -456,6 +535,8 @@ a.btn:hover { text-decoration: none; }
     news: { cat: '', place: '', slot: '', q: '', mine: false, issue: null, page: 1 },
     op: { kind: '', press: '', q: '', page: 1 },
     open: new Set(),
+    gloss: null, termView: 'today', dict: { cat: '', q: '', unknown: false }, card: { src: 'today', deck: null, i: 0, shown: false },
+    people: null, personIdx: 0, personAll: false,
     papers: null, paperById: new Map(), papersLatest: null,
     pp: { j: '', f: '', days: 30, oa: false, ml: false, mine: false, q: '', page: 1 },
     paperView: 'list', trends: null, tv: 0,
@@ -469,6 +550,7 @@ a.btn:hover { text-decoration: none; }
   };
   let notes = store.get(KEY_NOTES, {});
   let words = store.get(KEY_WORDS, []);
+  const known = new Set(store.get(KEY_KNOWN, []));
 
   // ── 도우미 ──
   const $ = (id) => document.getElementById(id);
@@ -517,13 +599,13 @@ a.btn:hover { text-decoration: none; }
     $('prevDay').addEventListener('click', () => stepDate(1));
     $('nextDay').addEventListener('click', () => stepDate(-1));
     document.querySelectorAll('.tabs button').forEach((b) => b.addEventListener('click', () => showTab(b.dataset.tab)));
-    bindNews(); bindOpinion(); bindNote(); bindPapers();
-    loadPapersLatest();
+    bindNews(); bindOpinion(); bindNote(); bindPapers(); bindTerms();
+    loadPapersLatest(); loadPeople();
     const hash = location.hash.replace('#', '');
     const want = new URLSearchParams(location.search).get('d');
     await loadDate(want && S.index.dates.some((x) => x.d === want) ? want : S.index.latest);
     if (hash === 'trends') S.paperView = 'trend';
-    showTab(hash === 'trends' ? 'papers' : ['home', 'news', 'opinion', 'papers', 'note', 'about'].includes(hash) ? hash : 'home');
+    showTab(hash === 'trends' ? 'papers' : ['home', 'news', 'opinion', 'papers', 'terms', 'note', 'about'].includes(hash) ? hash : 'home');
     $('loading').remove();
   }
 
@@ -544,7 +626,7 @@ a.btn:hover { text-decoration: none; }
     S.byId = new Map(S.day.articles.map((a) => [a.id, a]));
     S.catColor = {};
     (S.day.categories || []).forEach((c, i) => { S.catColor[c] = CAT_COLORS[i % CAT_COLORS.length]; });
-    S.news = { cat: '', place: '', slot: '', q: '', mine: S.news.mine, issue: null, page: 1 };
+    S.news = { cat: '', place: '', slot: '', q: '', mine: S.news.mine, issue: null, term: null, page: 1 };
     S.op = { kind: '', press: '', q: '', page: 1 };
     S.open.clear();
     $('newsQ').value = ''; $('opQ').value = '';
@@ -563,9 +645,10 @@ a.btn:hover { text-decoration: none; }
     history.replaceState(null, '', `#${tab}`);
     if (tab === 'note') renderNote();
     if (tab === 'papers') renderPaperViews();
+    if (tab === 'terms') renderTerms();
   }
 
-  function renderAll() { renderHome(); renderNewsFilters(); renderNews(); renderOpFilters(); renderOps(); renderNote(); refreshPapers(); }
+  function renderAll() { renderHome(); renderNewsFilters(); renderNews(); renderOpFilters(); renderOps(); renderNote(); refreshPapers(); if (S.tab === 'terms') renderTerms(); }
 
   // ── 스크랩 데이터 ──
   function noteOf(d) { return notes[d] || (notes[d] = { memo: '', items: [] }); }
@@ -645,7 +728,7 @@ a.btn:hover { text-decoration: none; }
     const key = e.currentTarget.dataset.key;
     const [kind, ...rest] = key.split(':');
     const val = rest.join(':');
-    S.news = { ...S.news, cat: kind === 'cat' ? val : '', place: kind === 'place' ? `p:${val}` : '', slot: '', q: '', issue: null, page: 1 };
+    S.news = { ...S.news, cat: kind === 'cat' ? val : '', place: kind === 'place' ? `p:${val}` : '', slot: '', q: '', issue: null, term: null, page: 1 };
     $('newsQ').value = '';
     renderNewsFilters(); renderNews(); showTab('news'); window.scrollTo(0, 0);
   }
@@ -691,7 +774,7 @@ a.btn:hover { text-decoration: none; }
       toggleSave(issueEntry(it));
       renderHome();
     } else if (btn.dataset.act === 'all') {
-      S.news = { ...S.news, cat: '', place: '', slot: '', q: '', issue: idx, page: 1 };
+      S.news = { ...S.news, cat: '', place: '', slot: '', q: '', issue: idx, term: null, page: 1 };
       $('newsQ').value = '';
       renderNewsFilters(); renderNews(); showTab('news'); window.scrollTo(0, 0);
     }
@@ -773,6 +856,7 @@ a.btn:hover { text-decoration: none; }
         if (kind === 'a' && !((a.ar || []).includes(val) || a.a === val)) return false;
       }
       if (f.slot && slotOf(a.at) !== f.slot) return false;
+      if (f.term && !f.term.rx.test(`${a.t} ${a.d || ''}`)) return false;
       if (f.mine && !words.some((k) => a.t.includes(k) || (a.d || '').includes(k))) return false;
       return textMatch(a, f.q);
     });
@@ -802,6 +886,9 @@ a.btn:hover { text-decoration: none; }
     if (f.issue != null && S.day.issues[f.issue]) {
       notice.innerHTML = `<div class="notice"><span>주요 이슈 ${S.day.issues[f.issue].rank}위 기사만 표시 중: ${esc(S.day.issues[f.issue].t)}</span><button class="btn" type="button" id="clearIssue">전체 기사 보기</button></div>`;
       $('clearIssue').addEventListener('click', () => { S.news.issue = null; S.news.page = 1; renderNews(); });
+    } else if (f.term) {
+      notice.innerHTML = `<div class="notice"><span>용어 '${esc(f.term.name)}'가 나온 기사만 표시 중</span><button class="btn" type="button" id="clearTerm">전체 기사 보기</button></div>`;
+      $('clearTerm').addEventListener('click', () => { S.news.term = null; S.news.page = 1; renderNews(); });
     } else notice.innerHTML = '';
     const pages = Math.max(1, Math.ceil(list.length / NEWS_PER_PAGE));
     if (f.page > pages) f.page = pages;
@@ -1090,6 +1177,206 @@ a.btn:hover { text-decoration: none; }
     });
   }
 
+  // ── 용어·개념 ──
+  const escRx = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+  async function ensureGlossary() {
+    if (S.gloss) return;
+    try { S.gloss = await getJson('data/glossary.json'); } catch (e) { S.gloss = { '용어': [], '개념': [], error: true }; }
+    for (const t of S.gloss['용어'] || []) {
+      const names = [t['용어'], ...(t['다른 이름'] || [])].filter(Boolean);
+      t._rx = new RegExp(names.map((n) => (/^[A-Za-z0-9 ]+$/.test(n) ? `(?<![A-Za-z])${escRx(n)}(?![A-Za-z])` : escRx(n))).join('|'));
+    }
+  }
+
+  function termCounts() {
+    if (S.termCountsDate === S.date && S.termCounts) return S.termCounts;
+    const counts = new Map();
+    for (const t of S.gloss['용어'] || []) {
+      let n = 0;
+      for (const a of S.day.articles) if (t._rx.test(`${a.t} ${a.d || ''}`)) n++;
+      if (n) counts.set(t['용어'], n);
+    }
+    S.termCounts = counts; S.termCountsDate = S.date;
+    return counts;
+  }
+
+  function toggleKnown(k) { if (known.has(k)) known.delete(k); else known.add(k); store.set(KEY_KNOWN, [...known]); }
+
+  function termCard(t, n) {
+    const isKnown = known.has(t['용어']);
+    const alias = (t['다른 이름'] || []).filter((x) => x && x !== t['용어']).slice(0, 3);
+    return `<div class="term ${isKnown ? 'known' : ''}">
+      <h3>${esc(t['용어'])}${alias.length ? `<span class="alias">${esc(alias.join(' · '))}</span>` : ''}${catHtml(t['분야'])}</h3>
+      <div class="def">${esc(t['뜻'])}</div>
+      ${t['더 알기'] ? `<div class="more">${esc(t['더 알기'])}</div>` : ''}
+      ${t['근거'] ? `<div class="law">근거: ${esc(t['근거'])}</div>` : ''}
+      ${(t['관련'] || []).length ? `<div class="rel">${t['관련'].map((r) => `<button type="button" data-rel="${esc(r)}">${esc(r)}</button>`).join('')}</div>` : ''}
+      <div class="acts">
+        ${n ? `<button class="btn" type="button" data-news="${esc(t['용어'])}">이 날 기사 ${n}건</button>` : ''}
+        <button class="btn ${isKnown ? 'on' : ''}" type="button" data-known="${esc(t['용어'])}">${isKnown ? '아는 용어' : '알아요'}</button>
+      </div>
+    </div>`;
+  }
+
+  function bindTermActions(root) {
+    root.querySelectorAll('[data-known]').forEach((b) => b.addEventListener('click', () => { toggleKnown(b.dataset.known); renderTerms(); }));
+    root.querySelectorAll('[data-news]').forEach((b) => b.addEventListener('click', () => openNewsForTerm(b.dataset.news)));
+    root.querySelectorAll('[data-rel]').forEach((b) => b.addEventListener('click', () => {
+      S.termView = 'dict'; S.dict = { cat: '', q: b.dataset.rel, unknown: false };
+      $('dictQ').value = b.dataset.rel; renderTerms(); window.scrollTo(0, 0);
+    }));
+  }
+
+  function openNewsForTerm(name) {
+    const t = (S.gloss['용어'] || []).find((x) => x['용어'] === name);
+    if (!t) return;
+    S.news = { ...S.news, cat: '', place: '', slot: '', q: '', issue: null, term: { name, rx: t._rx }, page: 1 };
+    $('newsQ').value = '';
+    renderNewsFilters(); renderNews(); showTab('news'); window.scrollTo(0, 0);
+  }
+
+  function openPaperSearch(word) {
+    S.paperView = 'list';
+    S.pp = { ...S.pp, q: word, days: 0, j: '', f: '', page: 1 };
+    $('paperQ').value = word;
+    showTab('papers');
+    if (S.papers) { renderPaperFilters(); renderPapers(); }
+    window.scrollTo(0, 0);
+  }
+
+  function bindTerms() {
+    let t;
+    $('dictQ').addEventListener('input', (e) => { clearTimeout(t); t = setTimeout(() => { S.dict.q = e.target.value.trim(); renderDict(); }, 200); });
+    $('dictUnknown').addEventListener('click', () => { S.dict.unknown = !S.dict.unknown; renderDict(); });
+  }
+
+  async function renderTerms() {
+    if (!S.gloss) await ensureGlossary();
+    const views = [['today', '기사 속 용어'], ['cards', '카드 학습'], ['dict', '용어 사전'], ['concepts', '학술 개념']];
+    $('termViews').innerHTML = views.map(([v, l]) => `<button class="chip" type="button" data-tv="${v}" aria-pressed="${S.termView === v}">${l}</button>`).join('');
+    $('termViews').querySelectorAll('[data-tv]').forEach((b) => b.addEventListener('click', () => { S.termView = b.dataset.tv; renderTerms(); }));
+    for (const [v] of views) $(`term-${v}`).hidden = S.termView !== v;
+    if (S.termView === 'today') renderTermToday();
+    else if (S.termView === 'cards') renderCards();
+    else if (S.termView === 'dict') renderDict();
+    else renderConcepts();
+  }
+
+  function renderTermToday() {
+    const counts = termCounts();
+    const list = (S.gloss['용어'] || []).filter((t) => counts.get(t['용어'])).sort((a, b) => counts.get(b['용어']) - counts.get(a['용어']));
+    $('termTodayTitle').textContent = `${dayLabel(S.date)} 기사 속 용어`;
+    $('termTodayCount').textContent = `사전 용어 ${list.length}개가 기사에 나옴 · 많이 나온 순 · 아는 용어 ${list.filter((t) => known.has(t['용어'])).length}개`;
+    $('termTodayList').innerHTML = list.slice(0, 40).map((t) => termCard(t, counts.get(t['용어']))).join('') || '<div class="empty">사전 용어가 나온 기사 없음</div>';
+    bindTermActions($('termTodayList'));
+  }
+
+  function cardPool() {
+    const terms = S.gloss['용어'] || [];
+    if (S.card.src === 'today') { const c = termCounts(); return terms.filter((t) => c.get(t['용어'])); }
+    if (S.card.src === 'unknown') return terms.filter((t) => !known.has(t['용어']));
+    if (S.card.src === 'concepts') {
+      return (S.gloss['개념'] || []).map((c) => ({ '용어': c['개념'], '다른 이름': [c['한글']], '분야': '학술 개념', '뜻': c['뜻'], '더 알기': c['더 알기'], '근거': c['문헌'] ? `문헌: ${c['문헌']}` : '' }));
+    }
+    return terms;
+  }
+
+  function shuffle(a) { for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a; }
+
+  function renderCards() {
+    const srcs = [['today', '이 날 기사 용어'], ['all', '전체 용어'], ['unknown', '모르는 용어'], ['concepts', '학술 개념']];
+    $('cardSource').innerHTML = srcs.map(([v, l]) => `<button class="chip" type="button" data-src="${v}" aria-pressed="${S.card.src === v}">${l}</button>`).join('');
+    $('cardSource').querySelectorAll('[data-src]').forEach((b) => b.addEventListener('click', () => { S.card = { src: b.dataset.src, deck: null, i: 0, shown: false }; renderCards(); }));
+    if (!S.card.deck) S.card.deck = shuffle(cardPool().slice());
+    const deck = S.card.deck;
+    if (!deck.length) { $('flash').innerHTML = '<div class="empty">카드 없음</div>'; $('cardProgress').textContent = ''; return; }
+    if (S.card.i >= deck.length) { S.card.i = 0; shuffle(deck); }
+    const t = deck[S.card.i];
+    const alias = (t['다른 이름'] || []).filter((x) => x && x !== t['용어']).slice(0, 2);
+    $('flash').innerHTML = `<div class="word">${esc(t['용어'])}</div>
+      ${alias.length ? `<div class="alias">${esc(alias.join(' · '))}</div>` : ''}
+      <div>${t['분야'] === '학술 개념' ? '<span class="tag">학술 개념</span>' : catHtml(t['분야'])}</div>
+      ${S.card.shown ? `<div class="def">${esc(t['뜻'])}</div>${t['더 알기'] ? `<div class="more">${esc(t['더 알기'])}</div>` : ''}${t['근거'] ? `<div class="more">${esc(t['근거'].startsWith('문헌') ? t['근거'] : `근거: ${t['근거']}`)}</div>` : ''}` : ''}
+      <div class="acts">${S.card.shown
+        ? '<button class="btn" type="button" data-card="again">다시 볼래요</button><button class="btn on" type="button" data-card="know">알아요</button>'
+        : '<button class="btn" type="button" data-card="show">뜻 보기</button><button class="btn" type="button" data-card="skip">넘기기</button>'}</div>`;
+    $('flash').querySelectorAll('[data-card]').forEach((b) => b.addEventListener('click', () => {
+      const act = b.dataset.card;
+      if (act === 'show') S.card.shown = true;
+      else {
+        if (act === 'know') known.add(t['용어']);
+        if (act === 'again') known.delete(t['용어']);
+        store.set(KEY_KNOWN, [...known]);
+        S.card.i += 1; S.card.shown = false;
+      }
+      renderCards();
+    }));
+    const terms = S.gloss['용어'] || [];
+    $('cardProgress').textContent = `${S.card.i + 1} / ${deck.length} · 전체 용어 중 아는 용어 ${terms.filter((x) => known.has(x['용어'])).length} / ${terms.length}`;
+  }
+
+  function renderDict() {
+    const terms = S.gloss['용어'] || [];
+    const cats = [...new Set(terms.map((t) => t['분야']))];
+    $('dictCats').innerHTML = [['', `전체 ${terms.length}`], ...cats.map((c) => [c, `${c} ${terms.filter((t) => t['분야'] === c).length}`])]
+      .map(([v, l]) => `<button class="chip" type="button" data-dc="${esc(v)}" aria-pressed="${S.dict.cat === v}">${v ? `<span class="cat" style="--c:${S.catColor[v] || '#888'}"></span>` : ''}${esc(l)}</button>`).join('');
+    $('dictCats').querySelectorAll('[data-dc]').forEach((b) => b.addEventListener('click', () => { S.dict.cat = b.dataset.dc; renderDict(); }));
+    $('dictUnknown').setAttribute('aria-pressed', String(S.dict.unknown));
+    const q = (S.dict.q || '').toLowerCase();
+    const list = terms.filter((t) => (!S.dict.cat || t['분야'] === S.dict.cat) && (!S.dict.unknown || !known.has(t['용어']))
+      && (!q || `${t['용어']} ${(t['다른 이름'] || []).join(' ')} ${t['뜻']} ${t['더 알기'] || ''}`.toLowerCase().includes(q)))
+      .sort((a, b) => a['용어'].localeCompare(b['용어'], 'ko'));
+    const counts = termCounts();
+    $('dictCount').textContent = `${list.length}개 · 가나다순 · 아는 용어 ${list.filter((t) => known.has(t['용어'])).length}개`;
+    $('dictList').innerHTML = list.map((t) => termCard(t, counts.get(t['용어']) || 0)).join('') || '<div class="empty">조건에 맞는 용어 없음</div>';
+    bindTermActions($('dictList'));
+  }
+
+  function renderConcepts() {
+    $('conceptList').innerHTML = (S.gloss['개념'] || []).map((c) => {
+      const isKnown = known.has(c['개념']);
+      return `<div class="term ${isKnown ? 'known' : ''}">
+        <h3>${esc(c['개념'])}<span class="alias">${esc(c['한글'] || '')}</span></h3>
+        <div class="def">${esc(c['뜻'])}</div>
+        ${c['더 알기'] ? `<div class="more">${esc(c['더 알기'])}</div>` : ''}
+        ${c['문헌'] ? `<div class="law">문헌: ${esc(c['문헌'])}</div>` : ''}
+        ${(c['관련'] || []).length ? `<div class="rel">${c['관련'].map((r) => `<span class="tag">${esc(r)}</span>`).join('')}</div>` : ''}
+        <div class="acts">
+          <button class="btn" type="button" data-paper="${esc(c['검색어'] || c['개념'])}">관련 논문 찾기</button>
+          <button class="btn ${isKnown ? 'on' : ''}" type="button" data-cknown="${esc(c['개념'])}">${isKnown ? '아는 개념' : '알아요'}</button>
+        </div>
+      </div>`;
+    }).join('') || '<div class="empty">개념 없음</div>';
+    $('conceptList').querySelectorAll('[data-paper]').forEach((b) => b.addEventListener('click', () => openPaperSearch(b.dataset.paper)));
+    $('conceptList').querySelectorAll('[data-cknown]').forEach((b) => b.addEventListener('click', () => { toggleKnown(b.dataset.cknown); renderConcepts(); }));
+  }
+
+  // ── 관심 필자 (오피니언) ──
+  async function loadPeople() {
+    try { S.people = await getJson('data/people.json'); } catch (e) { S.people = null; }
+    renderPeople();
+  }
+
+  function renderPeople() {
+    const box = $('peopleBox');
+    const ps = ((S.people && S.people.people) || []).filter((p) => p.items && p.items.length);
+    if (!ps.length) { box.innerHTML = ''; return; }
+    if (!(S.personIdx < ps.length)) S.personIdx = 0;
+    const p = ps[S.personIdx];
+    const items = S.personAll ? p.items : p.items.slice(0, 6);
+    box.innerHTML = `<div class="people">
+      <div class="peoplehead"><h2>관심 필자</h2><span class="count">칼럼·인터뷰·인용 기사 · 최신순 · 지역·분야 거르기 없음</span></div>
+      ${ps.length > 1 ? `<div class="chips">${ps.map((x, i) => `<button class="chip" type="button" data-person="${i}" aria-pressed="${i === S.personIdx}">${esc(x.name)} ${x.items.length}</button>`).join('')}</div>` : ''}
+      <div class="pname">${esc(p.name)} <span class="count">${esc(p.intro || '')} · ${p.items.length}건</span></div>
+      <ul class="list">${items.map((a) => `<li class="item"><div>${link(a.u, hl(a.t), 't')}</div><div class="meta"><span>${esc((a.at || '').slice(0, 10).replace(/-/g, '.'))}</span><span>${esc(a.p)}</span><span class="tag ${a.k ? 'op' : ''}">${a.k || '기사'}</span></div></li>`).join('')}</ul>
+      ${p.items.length > 6 ? `<button class="btn" type="button" id="personMore">${S.personAll ? '접기' : `${p.items.length}건 모두 보기`}</button>` : ''}
+    </div>`;
+    box.querySelectorAll('[data-person]').forEach((b) => b.addEventListener('click', () => { S.personIdx = Number(b.dataset.person); S.personAll = false; renderPeople(); }));
+    const more = $('personMore');
+    if (more) more.addEventListener('click', () => { S.personAll = !S.personAll; renderPeople(); });
+  }
+
   // ── 스크랩 ──
   function bindNote() {
     let t;
@@ -1099,7 +1386,7 @@ a.btn:hover { text-decoration: none; }
       t = setTimeout(() => { $('memoSaved').textContent = saveNotes() ? `저장됨 ${new Date().toTimeString().slice(0, 5)}` : '저장 실패 · 브라우저 저장 공간 차단 여부 확인'; renderNoteDates(); }, 400);
     });
     $('exportMd').addEventListener('click', exportMarkdown);
-    $('exportJson').addEventListener('click', () => download('urban-scale-백업.json', JSON.stringify({ notes, words }, null, 2), 'application/json'));
+    $('exportJson').addEventListener('click', () => download('urban-scale-백업.json', JSON.stringify({ notes, words, known: [...known] }, null, 2), 'application/json'));
     $('importJson').addEventListener('change', importBackup);
   }
 
@@ -1174,6 +1461,8 @@ a.btn:hover { text-decoration: none; }
           for (const x of n.items || []) if (!cur.items.some((y) => y.id === x.id)) { cur.items.push(x); added++; }
         }
         for (const k of data.words || []) if (!words.includes(k)) words.push(k);
+        for (const k of data.known || []) known.add(k);
+        store.set(KEY_KNOWN, [...known]);
         saveNotes(); store.set(KEY_WORDS, words);
         $('importMsg').textContent = `불러오기 완료 · 항목 ${added}개 추가`;
         renderAll();
