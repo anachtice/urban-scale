@@ -8,6 +8,7 @@ Urban Scale 수집기
   3. 분야를 정한다 (config/categories.json).
   4. 제목이 비슷한 기사끼리 이슈로 묶고, 다룬 언론사 수로 순위를 매긴다 (config/settings.json 의 '이슈 묶기').
   5. docs/data/날짜.json 과 docs/data/index.json 에 저장한다. 사이트(docs/index.html)가 이 파일을 읽는다.
+  6. 용어 사전에 없는데 최근 제목에 자주 나온 말을 골라 위키백과에서 뜻을 찾는다 (docs/data/new-terms.json).
 
 실행
   python collect.py               네이버 API로 수집 (NAVER_CLIENT_ID, NAVER_CLIENT_SECRET 필요. .env 파일도 읽음)
@@ -768,6 +769,192 @@ def update_people(now, last_run, ctx, source):
     save_json(PEOPLE_PATH, {"updated": now.isoformat(timespec="minutes"), "people": out})
 
 
+# ───────────────────────── 사전 밖 용어 ─────────────────────────
+# 최근 며칠 기사 제목에 자주 나왔는데 용어 사전에 없는 말을 고르고, 위키백과 요약에서 뜻을 찾아 붙인다.
+# 사람·지명·기업·동음이의어 문서와 도시와 관계없어 보이는 뜻은 싣지 않는다. 찾은 결과는 저장해 두고 다시 묻지 않는다.
+
+NEW_TERMS_PATH = os.path.join(DATA_DIR, "new-terms.json")
+NEW_TERMS_CACHE_PATH = os.path.join(DATA_DIR, "new-terms-cache.json")  # 찾아본 결과(사이트는 읽지 않음)
+WIKI_SUMMARY_URL = "https://ko.wikipedia.org/api/rest_v1/page/summary/"
+WIKI_USER_AGENT = "UrbanScale/1.0 (https://github.com/anachtice/urban-scale; personal study site)"
+SENTENCE_RX = re.compile(r"(?<=[다음함임됨])\.\s+")
+BIRTH_RX = re.compile(r"\d{3,4}년\s*\d{1,2}월\s*\d{1,2}일")
+PLACE_DESC_RX = re.compile(r"(의 도시|도시$|의 시$|의 군$|의 구$|의 동$|의 읍$|의 면$|행정 구역|법정동|행정동|의 수도|국가$|나라$|섬$|산$|강$|하천|호수|"
+                           r"철도역|전철역|지하철역|역$|공항$|항구|다리$|교량|단지$|건축물$|빌딩$|거리$)")
+WHO_DESC_RX = re.compile(r"(정치인|배우|가수|선수|기업인|법조인|작가|방송인|국회의원|시장$|도지사|교수|학자|감독|군인|인물|"
+                         r"기업|회사|브랜드|기관|공단|공사$|정당|단체|협회|위원회$|은행$|그룹$|방송|신문|언론|"
+                         r"드라마|영화|음반|노래|싱글|프로그램|게임|만화|소설|잡지|밴드|캐릭터|동음이의어|성씨|이름$)")
+PROPER_RX = re.compile(r"(에 있는|에 위치한|에 위치하는|에 소재한|(기업|회사|건설사|그룹|브랜드|기관|공기업|정당|단체|협회|은행|방송사|신문사)(이다|이며|으로서))")
+VERBISH_RX = re.compile(r"(었다|았다|였다|했다|됐다|한다|된다|는다|린다|른다|진다|온다|간다|운다|친다|낸다|있다|없다|아니다|싶다|렵다|롭다|겠다|"
+                        r"하고|되고|지고|빠르고|하며|되며|하면|되면|해야|하는|되는|하던|있는|없는|지만|는데|면서|려고|도록|하자|"
+                        r"어나|어져|아져|워져|라고|니까|었던|았던|해진|해서|돼서|어서|아서|쌓이는|이는|이고|이며|나온|오른|내린|찾아|돌아|적어|늘어|줄어)$")
+
+
+def wiki_define(word):
+    """위키백과 요약. 반환: (상태, 뜻) — 상태는 ok(뜻 있음) / none(문서 없음) / amb(동음이의어) / off(도시와 관계없음·고유명사)."""
+    url = WIKI_SUMMARY_URL + urllib.parse.quote(word, safe="")
+    try:
+        data = json.loads(http_get(url, headers={"User-Agent": WIKI_USER_AGENT, "Accept": "application/json"}, tries=2))
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return "none", None
+        raise
+    if data.get("type") == "disambiguation":
+        return "amb", None
+    extract = clean(data.get("extract") or "")
+    if not extract:
+        return "none", None
+    title, desc = data.get("title") or word, clean(data.get("description") or "")
+    first = SENTENCE_RX.split(extract)[0]
+    if BIRTH_RX.search(extract[:120]) or WHO_DESC_RX.search(desc) or PLACE_DESC_RX.search(desc) or PROPER_RX.search(first):
+        return "off", {"title": title, "why": desc or first[:60]}
+    sents = SENTENCE_RX.split(extract)
+    text = sents[0]
+    if len(sents) > 1 and len(text) + len(sents[1]) < 230:
+        text = f"{text}. {sents[1]}"
+    if len(text) > 260:
+        text = text[:260].rstrip() + "…"
+    elif not text.endswith((".", "…")):
+        text += "."
+    page = ((data.get("content_urls") or {}).get("desktop") or {}).get("page") \
+        or "https://ko.wikipedia.org/wiki/" + urllib.parse.quote(title.replace(" ", "_"))
+    return "ok", {"title": title, "text": text, "url": page, "src": "위키백과"}
+
+
+def place_stems(cfg):
+    stems = set()
+    for group in ("서울", "신도시", "경기·인천"):
+        for key, words in cfg.get(group, {}).items():
+            stems.add(key)
+            stems.update(words)
+    for key in ("서울 전체", "경기·인천 전체", "수도권 전체", "비수도권"):
+        stems.update(cfg.get(key, []))
+    stems.update(cfg.get("조건이 붙는 말", {}).keys())
+    return {re.sub(r"\s+", "", w) for w in stems if len(w) >= 2}
+
+
+def update_new_terms(now, ctx):
+    cfg = ctx.settings.get("사전 밖 용어")
+    if not cfg:
+        return
+    gloss = load_config("glossary.json")
+    known = set()
+    for t in gloss.get("용어", []):
+        known.update([t["용어"], *t.get("다른 이름", [])])
+    for c in gloss.get("개념", []):
+        known.update([c.get("개념", ""), c.get("한글", "")])
+    known = {re.sub(r"\s+", "", k).upper() for k in known if len(k) >= 2}
+    stems = place_stems(load_config("regions.json"))
+    press_names = set(ctx.press_map.values())
+    drop = set(ctx.settings["이슈 묶기"]["버릴 말"]) | set(cfg.get("버릴 말", []))
+    days = cfg.get("살필 날 수", 7)
+
+    count, on_days, examples = Counter(), defaultdict(set), defaultdict(list)
+    dates = [(now - timedelta(days=k)).strftime("%Y-%m-%d") for k in range(days)]
+    used = []
+    for d in dates:
+        path = day_path(d)
+        if not os.path.exists(path):
+            continue
+        used.append(d)
+        with open(path, encoding="utf-8") as f:
+            arts = json.load(f).get("articles", [])
+        raws = [raw_words(a["t"]) for a in arts]
+        vocab = {w for ws in raws for w in ws}
+        for a, ws in zip(arts, raws):
+            for t in set(title_tokens(ws, vocab, drop)):
+                count[t] += 1
+                on_days[t].add(d)
+                if len(examples[t]) < 6:
+                    examples[t].append({"t": a["t"], "u": a.get("u"), "p": a.get("p"), "d": d})
+
+    def skip(t):
+        if len(t) > 12 or any(ch.isdigit() for ch in t) or t in press_names:
+            return True
+        if any(k in t or t in k for k in known):
+            return True
+        if t.isascii():
+            return not (t.isalpha() and 2 <= len(t) <= 6)  # 영어는 약어(UAM, BIM 등)만
+        if not re.fullmatch(r"[가-힣A-Za-z]+", t) or VERBISH_RX.search(t):
+            return True
+        if t.endswith(("값", "일보", "신문", "뉴스", "방송", "건설", "이앤씨", "그룹", "홀딩스", "증권", "은행", "시장", "구청장", "의원", "장관")):
+            return True
+        if len(t) >= 3 and t.endswith("다") and (ord(t[-2]) - 0xAC00) % 28 in (4, 20):  # 'ㄴ다·ㅆ다'로 끝나는 말(오른다, 올랐다)
+            return True
+        return any(t.startswith(p) for p in stems)
+
+    min_n, min_days = cfg.get("최소 기사 수", 4), cfg.get("최소 날 수", 2)
+    cands = [t for t, n in count.most_common() if n >= min_n and len(on_days[t]) >= min(min_days, len(used)) and not skip(t)]
+
+    cache = {}
+    if os.path.exists(NEW_TERMS_CACHE_PATH):
+        with open(NEW_TERMS_CACHE_PATH, encoding="utf-8") as f:
+            cache = json.load(f)
+    today = now.strftime("%Y-%m-%d")
+    retry = {"ok": cfg.get("다시 찾아볼 날 수(뜻 있음)", 90), "off": 90, "amb": 30, "none": cfg.get("다시 찾아볼 날 수(뜻 없음)", 14)}
+
+    def stale(t):
+        c = cache.get(t)
+        if not c:
+            return True
+        try:
+            age = (now.date() - datetime.strptime(c["at"], "%Y-%m-%d").date()).days
+        except (KeyError, ValueError):
+            return True
+        return age >= retry.get(c.get("st"), 14)
+
+    budget, looked, stopped = cfg.get("한 번에 찾아볼 수", 30), 0, ""
+    for t in cands:
+        if looked >= budget:
+            break
+        if not stale(t):
+            continue
+        try:
+            st, info = wiki_define(t)
+        except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, ValueError) as e:
+            stopped = f"위키백과 응답 오류({getattr(e, 'code', '') or type(e).__name__}) — 다음 수집 때 이어서 찾음"
+            break
+        hits = {m for m in cfg.get("도시 관련 낱말", []) if m in f"{info['title']} {info['text']}"} if st == "ok" else set()
+        if st == "ok" and len(hits) < cfg.get("도시 관련 낱말 최소 수", 2):  # '제도로'의 '도로'처럼 우연히 겹치는 경우를 줄이려고 2개 이상
+            st, info = "off", {"title": info["title"], "why": "도시와 관계 적은 뜻"}
+        cache[t] = {"st": st, "at": today, **({"def": info} if st == "ok" else {"why": (info or {}).get("why", "")} if info else {})}
+        looked += 1
+        time.sleep(1.0)
+
+    def item(t):
+        ex, seen_p = [], set()
+        for e in sorted(examples[t], key=lambda x: x["d"], reverse=True):
+            if e["p"] in seen_p:
+                continue
+            seen_p.add(e["p"])
+            ex.append(e)
+        return {"w": t, "n": count[t], "nd": len(on_days[t]), "ex": ex[:3]}
+
+    found, missing, hidden, pending = [], [], 0, 0
+    for t in cands:
+        c = cache.get(t)
+        if not c:
+            pending += 1
+        elif c["st"] == "ok":
+            found.append({**item(t), "def": c["def"]})
+        elif c["st"] == "none":
+            missing.append({"w": t, "n": count[t], "nd": len(on_days[t])})
+        else:
+            hidden += 1
+    keep = set(cands)
+    cache = {t: c for t, c in cache.items() if t in keep or (now.date() - datetime.strptime(c["at"], "%Y-%m-%d").date()).days < 120}
+    shown = cfg.get("보여줄 수", 40)
+    save_json(NEW_TERMS_PATH, {
+        "updated": now.isoformat(timespec="minutes"),
+        "from": min(used) if used else None, "to": max(used) if used else None, "days": len(used),
+        "min_n": min_n, "items": found[:shown], "missing": missing[:shown], "hidden": hidden, "pending": pending,
+        "note": stopped,
+    })
+    save_json(NEW_TERMS_CACHE_PATH, cache)
+    print(f"  사전 밖 용어: 후보 {len(cands)}개 · 뜻 찾음 {len(found)} · 못 찾음 {len(missing)} · 뺌 {hidden} · 이번에 찾아본 수 {looked}"
+          + (f" · {stopped}" if stopped else ""))
+
+
 # ───────────────────────── 학술 논문 (OpenAlex) ─────────────────────────
 # config/journals.json 의 학술지에서 최근 논문의 제목·저자·초록·링크를 받는다. PDF 파일은 저장하지 않는다.
 
@@ -1160,6 +1347,10 @@ def main():
     write_index(index, ctx.settings.get("보관 일수", 0), now, last_run)
     publish_glossary()
     update_people(now, last_run, ctx, args.source)
+    try:
+        update_new_terms(now, ctx)
+    except Exception as e:  # 이 단계가 실패해도 기사 수집 결과는 저장되게
+        print("  사전 밖 용어 단계 실패:", e)
     update_papers(now, force=args.papers)
     update_trends(now, force=args.trends)
     print("\n저장 완료:", os.path.relpath(DATA_DIR, ROOT))

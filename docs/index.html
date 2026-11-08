@@ -199,6 +199,13 @@ a.btn:hover { text-decoration: none; }
 .term .rel button { font-size: 12px; border: 1px solid var(--line); background: var(--soft); border-radius: 999px; padding: 1px 9px; cursor: pointer; }
 .term .acts { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
 .term.known { background: var(--soft); }
+.term .ex { list-style: none; margin: 10px 0 0; padding: 10px 12px; background: var(--soft); border-radius: 9px; font-size: 13px; }
+.term .ex li { padding: 3px 0; }
+.term .ex .p { color: var(--ink-2); margin-left: 6px; white-space: nowrap; }
+.missing { margin-top: 22px; font-size: 14px; }
+.missing summary { cursor: pointer; font-weight: 650; }
+.missing .chips { margin-top: 10px; }
+.missing .chip { cursor: default; }
 .flash { border: 1px solid var(--line); border-radius: 14px; padding: 28px 22px; margin: 14px 0 8px; text-align: center; min-height: 240px; display: grid; align-content: center; gap: 10px; }
 .flash .word { font-size: 26px; font-weight: 800; letter-spacing: -0.01em; }
 .flash .def { font-size: 15.5px; max-width: 640px; margin: 4px auto 0; }
@@ -402,6 +409,14 @@ a.btn:hover { text-decoration: none; }
         <div class="termgrid" id="termTodayList"></div>
       </div>
     </div>
+    <div id="term-new" hidden>
+      <div class="card">
+        <h2>사전 밖 용어</h2>
+        <p class="lead" id="newTermLead"></p>
+        <div class="termgrid" id="newTermList"></div>
+        <details class="missing" id="newTermMissing" hidden></details>
+      </div>
+    </div>
     <div id="term-cards" hidden>
       <div class="card">
         <h2>카드 학습</h2>
@@ -499,6 +514,8 @@ a.btn:hover { text-decoration: none; }
       <ul>
         <li>사전: <code>config/glossary.json</code>의 도시 용어와 학술 개념(뜻·근거 법·관련 용어·문헌)</li>
         <li>기사 속 용어: 선택한 날짜 기사 제목·요약에 나온 사전 용어를 셈. 다른 이름(예: 재초환)도 함께 셈</li>
+        <li>사전 밖 용어: 최근 7일 기사 제목에서 사전에 없고 4건 이상 나온 말 → 위키백과 요약으로 뜻 자동 수집</li>
+        <li>사전 밖 용어 제외: 사람·지명·역·기업·기관·동음이의어 문서, 뜻에 도시 관련 낱말이 2개 미만인 말</li>
         <li>카드 학습·'알아요' 표시: 이 브라우저에만 저장, 백업 파일에 포함</li>
         <li>법 개정으로 자주 바뀌는 수치(기준 금액·비율)는 사전에 넣지 않음</li>
       </ul>
@@ -518,6 +535,7 @@ a.btn:hover { text-decoration: none; }
           <tr><td><code>config/settings.json</code></td><td>수집 시간 범위, 이슈 묶는 기준, 버릴 말</td></tr>
           <tr><td><code>config/journals.json</code></td><td>논문을 받아 올 학술지, 연구 동향 범위</td></tr>
           <tr><td><code>config/glossary.json</code></td><td>용어·개념 사전</td></tr>
+          <tr><td><code>config/settings.json</code>의 '사전 밖 용어'</td><td>살필 날 수, 최소 기사 수, 도시 관련 낱말, 버릴 말</td></tr>
           <tr><td><code>config/people.json</code></td><td>관심 필자·인물</td></tr>
         </tbody>
       </table>
@@ -616,7 +634,8 @@ a.btn:hover { text-decoration: none; }
     const want = new URLSearchParams(location.search).get('d');
     await loadDate(want && S.index.dates.some((x) => x.d === want) ? want : S.index.latest);
     if (hash === 'trends') S.paperView = 'trend';
-    showTab(hash === 'trends' ? 'papers' : ['home', 'news', 'opinion', 'papers', 'terms', 'note', 'about'].includes(hash) ? hash : 'home');
+    if (hash === 'newterms') S.termView = 'new';
+    showTab(hash === 'trends' ? 'papers' : hash === 'newterms' ? 'terms' : ['home', 'news', 'opinion', 'papers', 'terms', 'note', 'about'].includes(hash) ? hash : 'home');
     $('loading').remove();
   }
 
@@ -637,6 +656,7 @@ a.btn:hover { text-decoration: none; }
     S.byId = new Map(S.day.articles.map((a) => [a.id, a]));
     S.catColor = {};
     (S.day.categories || []).forEach((c, i) => { S.catColor[c] = CAT_COLORS[i % CAT_COLORS.length]; });
+    if (!S.catColor['건축·건설']) S.catColor['건축·건설'] = CAT_COLORS[8];  // 용어 사전에만 있는 분야
     S.news = { cat: '', place: '', slot: '', q: '', mine: S.news.mine, issue: null, term: null, page: 1 };
     S.op = { kind: '', press: '', q: '', page: 1 };
     S.open.clear();
@@ -1264,11 +1284,13 @@ a.btn:hover { text-decoration: none; }
 
   async function renderTerms() {
     if (!S.gloss) await ensureGlossary();
-    const views = [['today', '기사 속 용어'], ['cards', '카드 학습'], ['dict', '용어 사전'], ['concepts', '학술 개념']];
+    if (S.newTerms === undefined) await ensureNewTerms();
+    const views = [['today', '기사 속 용어'], ['new', '사전 밖 용어'], ['cards', '카드 학습'], ['dict', '용어 사전'], ['concepts', '학술 개념']];
     $('termViews').innerHTML = views.map(([v, l]) => `<button class="chip" type="button" data-tv="${v}" aria-pressed="${S.termView === v}">${l}</button>`).join('');
     $('termViews').querySelectorAll('[data-tv]').forEach((b) => b.addEventListener('click', () => { S.termView = b.dataset.tv; renderTerms(); }));
     for (const [v] of views) $(`term-${v}`).hidden = S.termView !== v;
     if (S.termView === 'today') renderTermToday();
+    else if (S.termView === 'new') renderNewTerms();
     else if (S.termView === 'cards') renderCards();
     else if (S.termView === 'dict') renderDict();
     else renderConcepts();
@@ -1287,6 +1309,9 @@ a.btn:hover { text-decoration: none; }
     const terms = S.gloss['용어'] || [];
     if (S.card.src === 'today') { const c = termCounts(); return terms.filter((t) => c.get(t['용어'])); }
     if (S.card.src === 'unknown') return terms.filter((t) => !known.has(t['용어']));
+    if (S.card.src === 'new') {
+      return ((S.newTerms && S.newTerms.items) || []).map((x) => ({ '용어': x.w, '다른 이름': x.def.title !== x.w ? [x.def.title] : [], '분야': '사전 밖 용어', '뜻': x.def.text, '더 알기': '', '근거': '출처: 위키백과(자동 수집)' }));
+    }
     if (S.card.src === 'concepts') {
       return (S.gloss['개념'] || []).map((c) => ({ '용어': c['개념'], '다른 이름': [c['한글']], '분야': '학술 개념', '뜻': c['뜻'], '더 알기': c['더 알기'], '근거': c['문헌'] ? `문헌: ${c['문헌']}` : '' }));
     }
@@ -1296,7 +1321,7 @@ a.btn:hover { text-decoration: none; }
   function shuffle(a) { for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a; }
 
   function renderCards() {
-    const srcs = [['today', '이 날 기사 용어'], ['all', '전체 용어'], ['unknown', '모르는 용어'], ['concepts', '학술 개념']];
+    const srcs = [['today', '이 날 기사 용어'], ['all', '전체 용어'], ['unknown', '모르는 용어'], ['new', '사전 밖 용어'], ['concepts', '학술 개념']];
     $('cardSource').innerHTML = srcs.map(([v, l]) => `<button class="chip" type="button" data-src="${v}" aria-pressed="${S.card.src === v}">${l}</button>`).join('');
     $('cardSource').querySelectorAll('[data-src]').forEach((b) => b.addEventListener('click', () => { S.card = { src: b.dataset.src, deck: null, i: 0, shown: false }; renderCards(); }));
     if (!S.card.deck) S.card.deck = shuffle(cardPool().slice());
@@ -1307,7 +1332,7 @@ a.btn:hover { text-decoration: none; }
     const alias = (t['다른 이름'] || []).filter((x) => x && x !== t['용어']).slice(0, 2);
     $('flash').innerHTML = `<div class="word">${esc(t['용어'])}</div>
       ${alias.length ? `<div class="alias">${esc(alias.join(' · '))}</div>` : ''}
-      <div>${t['분야'] === '학술 개념' ? '<span class="tag">학술 개념</span>' : catHtml(t['분야'])}</div>
+      <div>${t['분야'] === '학술 개념' || t['분야'] === '사전 밖 용어' ? `<span class="tag">${esc(t['분야'])}</span>` : catHtml(t['분야'])}</div>
       ${S.card.shown ? `<div class="def">${esc(t['뜻'])}</div>${t['더 알기'] ? `<div class="more">${esc(t['더 알기'])}</div>` : ''}${t['근거'] ? `<div class="more">${esc(t['근거'].startsWith('문헌') ? t['근거'] : `근거: ${t['근거']}`)}</div>` : ''}` : ''}
       <div class="acts">${S.card.shown
         ? '<button class="btn" type="button" data-card="again">다시 볼래요</button><button class="btn on" type="button" data-card="know">알아요</button>'
@@ -1342,6 +1367,40 @@ a.btn:hover { text-decoration: none; }
     $('dictCount').textContent = `${list.length}개 · 가나다순 · 아는 용어 ${list.filter((t) => known.has(t['용어'])).length}개`;
     $('dictList').innerHTML = list.map((t) => termCard(t, counts.get(t['용어']) || 0)).join('') || '<div class="empty">조건에 맞는 용어 없음</div>';
     bindTermActions($('dictList'));
+  }
+
+  async function ensureNewTerms() {
+    try { S.newTerms = await getJson('data/new-terms.json'); } catch (e) { S.newTerms = null; }
+  }
+
+  function renderNewTerms() {
+    const d = S.newTerms;
+    const box = $('newTermList'), miss = $('newTermMissing');
+    if (!d) {
+      $('newTermLead').textContent = '아직 자료 없음 · 다음 수집 후 표시';
+      box.innerHTML = ''; miss.hidden = true; return;
+    }
+    const md = (x) => { const [, m, dd] = x.split('-').map(Number); return `${m}월 ${dd}일`; };
+    const range = d.from && d.to ? (d.from === d.to ? md(d.from) : `${md(d.from)}~${md(d.to)}`) : '';
+    $('newTermLead').textContent = `${range} 기사 제목 기준 · 사전에 없고 ${d.min_n}건 이상 나온 말 · 뜻: 위키백과 요약 자동 수집(확인 필요)`
+      + (d.pending ? ` · 뜻 찾는 중 ${d.pending}개` : '');
+    box.innerHTML = (d.items || []).map((x) => {
+      const isKnown = known.has(x.w);
+      const other = x.def.title && x.def.title !== x.w;
+      return `<div class="term ${isKnown ? 'known' : ''}">
+        <h3>${esc(x.w)}${other ? `<span class="alias">${esc(x.def.title)}</span>` : ''}<span class="tag">자동 수집</span></h3>
+        <div class="def">${esc(x.def.text)}</div>
+        <div class="law">출처: <a href="${esc(x.def.url)}" target="_blank" rel="noopener">위키백과 '${esc(x.def.title)}'</a> · 기사 ${x.n}건(${x.nd}일)</div>
+        ${(x.ex || []).length ? `<ul class="ex">${x.ex.map((e) => `<li><a href="${esc(e.u || '#')}" target="_blank" rel="noopener">${esc(e.t)}</a><span class="p">${esc(e.p || '')}</span></li>`).join('')}</ul>` : ''}
+        <div class="acts"><button class="btn ${isKnown ? 'on' : ''}" type="button" data-known="${esc(x.w)}">${isKnown ? '아는 용어' : '알아요'}</button></div>
+      </div>`;
+    }).join('') || '<div class="empty">뜻을 찾은 말 없음</div>';
+    bindTermActions(box);
+    const ms = d.missing || [];
+    miss.hidden = !ms.length;
+    miss.innerHTML = ms.length ? `<summary>뜻 못 찾은 말 ${ms.length}개</summary>
+      <p class="lead">위키백과에 문서 없음 · 사전 추가 후보</p>
+      <div class="chips">${ms.map((x) => `<span class="chip">${esc(x.w)} ${x.n}</span>`).join('')}</div>` : '';
   }
 
   function renderConcepts() {
