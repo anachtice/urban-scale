@@ -156,6 +156,35 @@ textarea.memo { width: 100%; min-height: 150px; border: 1px solid var(--line); b
 a.btn { display: inline-block; }
 a.btn:hover { text-decoration: none; }
 
+/* 연구 동향 */
+.viewchips { margin: 0 2px 12px; }
+.mapwrap { border: 1px solid var(--line); border-radius: 10px; background: var(--panel); margin-top: 6px; overflow: hidden; }
+#trendMap { display: block; width: 100%; height: auto; }
+#trendMap line { stroke: var(--ink-2); opacity: .25; }
+#trendMap circle { stroke: var(--panel); stroke-width: 1.5; }
+#trendMap text { fill: var(--ink); paint-order: stroke; stroke: var(--panel); stroke-width: 3.5px; stroke-linejoin: round; font-weight: 650; }
+#trendMap .node { cursor: pointer; }
+#trendMap .node:hover circle, #trendMap .node:focus circle { stroke: var(--ink); stroke-width: 2.5; }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 16px; align-items: center; font-size: 12.5px; color: var(--ink-2); margin-top: 10px; }
+.legend .ramp { display: inline-block; width: 110px; height: 8px; border-radius: 4px; background: linear-gradient(90deg, rgb(58,109,179), rgb(169,168,160), rgb(217,98,43)); vertical-align: middle; margin: 0 6px; }
+.grid2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; margin-top: 16px; align-items: start; }
+.grid2 > .card { margin-top: 0; }
+@media (max-width: 880px) { .grid2 { grid-template-columns: minmax(0, 1fr); } }
+.rank-list { list-style: none; margin: 0; padding: 0; counter-reset: r; }
+.rank-list li { display: grid; grid-template-columns: 22px minmax(0, 1fr) auto 72px; gap: 8px; align-items: baseline; padding: 6px 0; border-top: 1px solid var(--line); font-size: 13.5px; counter-increment: r; }
+.rank-list li::before { content: counter(r); color: var(--ink-2); font-variant-numeric: tabular-nums; }
+.rank-list li:first-child { border-top: 0; }
+.rank-list li.empty { display: block; }
+.rank-list li.empty::before { content: none; }
+.rank-list .kw { background: none; border: 0; padding: 0; text-align: left; cursor: pointer; font-weight: 650; overflow-wrap: anywhere; }
+.rank-list .kw:hover { text-decoration: underline; text-underline-offset: 3px; }
+.rank-list .kwname { font-weight: 650; overflow-wrap: anywhere; }
+.rank-list .num { color: var(--ink-2); font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
+.rank-list .chg { font-weight: 700; text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.up { color: #b4501e; }
+.down { color: #2f5d9a; }
+@media (prefers-color-scheme: dark) { .up { color: #f0935f; } .down { color: #7fa8e0; } }
+
 /* 수집 기준 */
 .about h3 { font-size: 15px; margin: 18px 0 6px; }
 .about h3:first-child { margin-top: 0; }
@@ -273,19 +302,59 @@ a.btn:hover { text-decoration: none; }
   </section>
 
   <section id="tab-papers" hidden>
-    <div class="card">
-      <div class="filters">
-        <div class="row">
-          <label class="vh" for="paperJ">학술지</label>
-          <select class="field" id="paperJ"></select>
-          <label class="vh" for="paperQ">검색</label>
-          <input class="field" id="paperQ" type="search" placeholder="제목·초록·저자·주제 검색">
+    <div class="chips viewchips" id="paperViews"></div>
+    <div id="paperListView">
+      <div class="card">
+        <div class="filters">
+          <div class="row">
+            <label class="vh" for="paperJ">학술지</label>
+            <select class="field" id="paperJ"></select>
+            <label class="vh" for="paperQ">검색</label>
+            <input class="field" id="paperQ" type="search" placeholder="제목·초록·저자·주제 검색">
+          </div>
+          <div class="chips" id="paperFieldChips"></div>
+          <div class="chips" id="paperChips"></div>
         </div>
-        <div class="chips" id="paperChips"></div>
+        <div class="count" id="paperCount"></div>
+        <ul class="list" id="paperList"></ul>
+        <div class="pager" id="paperPager"></div>
       </div>
-      <div class="count" id="paperCount"></div>
-      <ul class="list" id="paperList"></ul>
-      <div class="pager" id="paperPager"></div>
+    </div>
+    <div id="trendView" hidden>
+      <div class="card">
+        <h2>키워드 지도</h2>
+        <div class="chips" id="trendScopes" style="margin-top:10px"></div>
+        <p class="lead" id="trendNote" style="margin-top:10px"></p>
+        <div class="mapwrap"><svg id="trendMap" viewBox="0 0 900 560" role="img" aria-label="키워드 지도"></svg></div>
+        <div class="legend">
+          <span>원 크기: 최근 1년 논문 수</span>
+          <span>거리: 가까울수록 같은 논문에 함께 자주 붙음</span>
+          <span>색: 비중 변화 줄어듦<span class="ramp"></span>늘어남</span>
+          <span>클릭 시 최신 논문 검색</span>
+        </div>
+      </div>
+      <div class="grid2">
+        <div class="card">
+          <h2>빠르게 늘어난 키워드</h2>
+          <p class="lead">그 전 1년 대비 비중 증가 순 · 클릭 시 최신 논문 검색</p>
+          <ol class="rank-list" id="trendRising"></ol>
+        </div>
+        <div class="card">
+          <h2>많이 다룬 키워드</h2>
+          <p class="lead">최근 1년 논문 수 순</p>
+          <ol class="rank-list" id="trendTopKw"></ol>
+        </div>
+        <div class="card">
+          <h2>많이 다룬 주제</h2>
+          <p class="lead">OpenAlex 주제 분류 기준</p>
+          <ol class="rank-list" id="trendTopics"></ol>
+        </div>
+        <div class="card">
+          <h2>인용 많은 최근 논문</h2>
+          <p class="lead">최근 2년 발표 · 인용 수 순</p>
+          <ul class="list" id="trendCited"></ul>
+        </div>
+      </div>
     </div>
   </section>
 
@@ -343,6 +412,13 @@ a.btn:hover { text-decoration: none; }
         <li>원문: PDF 미저장. 무료 공개 원문만 바로 연결, 유료 원문은 DOI로 연결(교내망·도서관 로그인 필요)</li>
         <li>국내 학술지: 영문 제목으로 수록, 최신호 반영이 두세 달 늦음</li>
       </ul>
+      <h3>연구 동향</h3>
+      <ul>
+        <li>범위: 관심 학술지, 도시·계획 분야, 도시 × 머신러닝, 건축 분야, 건설 분야(OpenAlex 세부분야·키워드 기준)</li>
+        <li>비교: 최근 1년(두 달 전까지)과 그 전 1년의 주제·키워드별 논문 수, 전체 논문 대비 비중 변화</li>
+        <li>키워드 지도: 원 크기 = 논문 수, 거리 = 같은 논문에 함께 붙은 정도, 색 = 비중 변화</li>
+        <li>주기: 7일마다 계산</li>
+      </ul>
       <h3>규칙 파일</h3>
       <table>
         <thead><tr><th>파일</th><th>내용</th></tr></thead>
@@ -381,7 +457,8 @@ a.btn:hover { text-decoration: none; }
     op: { kind: '', press: '', q: '', page: 1 },
     open: new Set(),
     papers: null, paperById: new Map(), papersLatest: null,
-    pp: { j: '', days: 30, oa: false, mine: false, q: '', page: 1 },
+    pp: { j: '', f: '', days: 30, oa: false, ml: false, mine: false, q: '', page: 1 },
+    paperView: 'list', trends: null, tv: 0,
     paperOpen: new Set(),
   };
 
@@ -445,7 +522,8 @@ a.btn:hover { text-decoration: none; }
     const hash = location.hash.replace('#', '');
     const want = new URLSearchParams(location.search).get('d');
     await loadDate(want && S.index.dates.some((x) => x.d === want) ? want : S.index.latest);
-    showTab(['home', 'news', 'opinion', 'papers', 'note', 'about'].includes(hash) ? hash : 'home');
+    if (hash === 'trends') S.paperView = 'trend';
+    showTab(hash === 'trends' ? 'papers' : ['home', 'news', 'opinion', 'papers', 'note', 'about'].includes(hash) ? hash : 'home');
     $('loading').remove();
   }
 
@@ -484,7 +562,7 @@ a.btn:hover { text-decoration: none; }
     document.querySelectorAll('main > section').forEach((s) => { s.hidden = s.id !== `tab-${tab}`; });
     history.replaceState(null, '', `#${tab}`);
     if (tab === 'note') renderNote();
-    if (tab === 'papers') ensurePapers();
+    if (tab === 'papers') renderPaperViews();
   }
 
   function renderAll() { renderHome(); renderNewsFilters(); renderNews(); renderOpFilters(); renderOps(); renderNote(); refreshPapers(); }
@@ -825,9 +903,15 @@ a.btn:hover { text-decoration: none; }
   function renderPaperFilters() {
     const js = S.papers.journals || [];
     const opt = (v, l) => `<option value="${esc(v)}" ${S.pp.j === v ? 'selected' : ''}>${esc(l)}</option>`;
-    const group = (g) => js.filter((j) => j.group === g).map((j) => opt(j.short, `${j.short} (${j.n})`)).join('');
-    $('paperJ').innerHTML = opt('', `전체 학술지 (${S.papers.papers.length})`)
-      + `<optgroup label="해외">${group('해외')}</optgroup><optgroup label="국내">${group('국내')}</optgroup>`;
+    const fields = [...new Set(js.map((j) => j.field || '기타'))];
+    $('paperJ').innerHTML = opt('', `전체 학술지 (${S.papers.papers.length})`) + fields.map((fd) => `<optgroup label="${esc(fd)}">${js
+      .filter((j) => (j.field || '기타') === fd).map((j) => opt(j.short, `${j.short}${j.group === '국내' ? ' (국내)' : ''} · ${j.n}`)).join('')}</optgroup>`).join('');
+    const mlCount = S.papers.papers.filter((p) => p.ml).length;
+    $('paperFieldChips').innerHTML = [['', '전체 분야'], ...fields.filter((fd) => fd !== '기타').map((fd) => [fd, fd])]
+      .map(([v, l]) => `<button class="chip" type="button" data-field="${esc(v)}" aria-pressed="${S.pp.f === v}">${esc(l)}</button>`).join('')
+      + `<button class="chip" type="button" id="paperMl" aria-pressed="${S.pp.ml}">머신러닝·예측 연구만 ${mlCount}</button>`;
+    $('paperFieldChips').querySelectorAll('[data-field]').forEach((b) => b.addEventListener('click', () => { S.pp.f = b.dataset.field; S.pp.j = ''; S.pp.page = 1; renderPaperFilters(); renderPapers(); }));
+    $('paperMl').addEventListener('click', () => { S.pp.ml = !S.pp.ml; S.pp.page = 1; renderPaperFilters(); renderPapers(); });
     const spans = [[7, '최근 7일'], [30, '최근 30일'], [0, `최근 ${S.papers.days || 90}일 전체`]];
     $('paperChips').innerHTML = spans.map(([d, l]) => `<button class="chip" type="button" data-days="${d}" aria-pressed="${S.pp.days === d}">${l}</button>`).join('')
       + `<button class="chip" type="button" id="paperOa" aria-pressed="${S.pp.oa}">무료 원문만</button>`
@@ -844,6 +928,8 @@ a.btn:hover { text-decoration: none; }
       if (f.j && p.j !== f.j) return false;
       if (cutoff && p.date < cutoff) return false;
       if (f.oa && !(p.pdf || p.oa)) return false;
+      if (f.f && p.f !== f.f) return false;
+      if (f.ml && !p.ml) return false;
       const hay = `${p.t} ${p.ab || ''} ${p.au || ''} ${(p.tp || []).join(' ')}`.toLowerCase();
       if (f.mine && !words.some((k) => hay.includes(k.toLowerCase()))) return false;
       return !f.q || f.q.toLowerCase().split(/\s+/).every((w) => hay.includes(w));
@@ -888,6 +974,119 @@ a.btn:hover { text-decoration: none; }
       if (p) { toggleSave(paperEntry(p)); renderPapers(); }
     }));
     pager($('paperPager'), f.page, pages, (pg) => { S.pp.page = pg; renderPapers(); $('tab-papers').scrollIntoView(); });
+  }
+
+  // ── 논문: 보기 전환·연구 동향 ──
+  const NEUTRAL = [169, 168, 160], UP = [217, 98, 43], DOWN = [58, 109, 179];
+  function changeColor(c) {
+    const t = Math.max(-1, Math.min(1, (c || 0) / 0.5));
+    const to = t >= 0 ? UP : DOWN, a = Math.abs(t);
+    return `rgb(${NEUTRAL.map((v, i) => Math.round(v + (to[i] - v) * a)).join(',')})`;
+  }
+  const pct = (c) => `${c >= 0 ? '+' : '−'}${Math.round(Math.abs(c) * 100)}%`;
+  const chgClass = (c) => (c > 0.05 ? 'up' : c < -0.05 ? 'down' : '');
+
+  function renderPaperViews() {
+    $('paperViews').innerHTML = [['list', '최신 논문'], ['trend', '연구 동향']]
+      .map(([v, l]) => `<button class="chip" type="button" data-view="${v}" aria-pressed="${S.paperView === v}">${l}</button>`).join('');
+    $('paperViews').querySelectorAll('[data-view]').forEach((b) => b.addEventListener('click', () => { S.paperView = b.dataset.view; renderPaperViews(); }));
+    $('paperListView').hidden = S.paperView !== 'list';
+    $('trendView').hidden = S.paperView !== 'trend';
+    history.replaceState(null, '', S.paperView === 'trend' ? '#trends' : '#papers');
+    if (S.paperView === 'list') ensurePapers(); else ensureTrends();
+  }
+
+  async function ensureTrends() {
+    if (!S.trends) {
+      $('trendNote').textContent = '불러오는 중…';
+      try { S.trends = await getJson('data/trends.json'); } catch (e) { S.trends = { scopes: [], error: true }; }
+    }
+    renderTrends();
+  }
+
+  function searchPapersFor(word) {
+    S.paperView = 'list';
+    S.pp = { ...S.pp, q: word, days: 0, j: '', f: '', page: 1 };
+    $('paperQ').value = word;
+    renderPaperViews();
+    if (S.papers) { renderPaperFilters(); renderPapers(); }
+    $('tab-papers').scrollIntoView();
+  }
+
+  function renderTrends() {
+    const T = S.trends;
+    if (!T.scopes || !T.scopes.length) {
+      $('trendNote').textContent = T.error ? '연구 동향 파일을 불러올 수 없음' : '계산된 연구 동향 없음 · 다음 수집 때 계산';
+      $('trendMap').innerHTML = '';
+      return;
+    }
+    if (S.tv >= T.scopes.length) S.tv = 0;
+    const sc = T.scopes[S.tv];
+    $('trendScopes').innerHTML = T.scopes.map((s, i) => `<button class="chip" type="button" data-scope="${i}" aria-pressed="${i === S.tv}">${esc(s.name)}</button>`).join('');
+    $('trendScopes').querySelectorAll('[data-scope]').forEach((b) => b.addEventListener('click', () => { S.tv = Number(b.dataset.scope); renderTrends(); }));
+    const ym = (d) => (d || '').slice(0, 7).replace('-', '.');
+    $('trendNote').textContent = `최근 1년(${ym(T.recent[0])}~${ym(T.recent[1])}) 논문 ${sc.n.toLocaleString()}편 · 그 전 1년(${ym(T.before[0])}~${ym(T.before[1])}) ${sc.n_prev.toLocaleString()}편과 비교 · OpenAlex 키워드·주제 기준 · ${fmtStamp(T.updated)} 갱신`;
+    drawTrendMap(sc.map || {});
+    const change = (x) => `<span class="chg ${x.new ? 'up' : chgClass(x.change)}">${x.new ? '새로 상위' : pct(x.change)}</span>`;
+    const kwItem = (k) => `<li><button type="button" class="kw" data-kw="${esc(k.name)}">${esc(k.name)}</button><span class="num">${k.n.toLocaleString()}편</span>${change(k)}</li>`;
+    $('trendRising').innerHTML = (sc.rising_keywords || []).map(kwItem).join('') || '<li class="empty">없음</li>';
+    $('trendTopKw').innerHTML = (sc.keywords || []).map(kwItem).join('') || '<li class="empty">없음</li>';
+    $('trendTopics').innerHTML = (sc.topics || []).map((t) => `<li><span class="kwname">${esc(t.name)}</span><span class="num">${t.n.toLocaleString()}편</span>${change(t)}</li>`).join('') || '<li class="empty">없음</li>';
+    $('trendCited').innerHTML = (sc.cited || []).map((c) => `<li class="item"><div>${link(c.u, esc(c.t), 't')}</div><div class="meta"><span class="jn">${esc(c.j)}</span><span>${esc(c.y)}</span><span>인용 ${Number(c.cite).toLocaleString()}</span></div></li>`).join('') || '<li class="empty">없음</li>';
+    document.querySelectorAll('#trendView [data-kw]').forEach((b) => b.addEventListener('click', () => searchPapersFor(b.dataset.kw)));
+  }
+
+  function drawTrendMap(map) {
+    const W = 900, H = 560;
+    const svg = $('trendMap');
+    const nodes = map.nodes || [];
+    if (!nodes.length) { svg.innerHTML = ''; return; }
+    const maxN = Math.max(...nodes.map((n) => n.n));
+    const P = nodes.map((n) => {
+      const s = Math.sqrt(n.n / maxN);
+      return { ...n, px: n.x * W, py: n.y * H, r: 7 + 23 * s, fs: 12.5 + 5 * s };
+    });
+    const lines = (map.links || []).map((l) => {
+      const a = P[l.a], b = P[l.b];
+      return `<line x1="${a.px.toFixed(1)}" y1="${a.py.toFixed(1)}" x2="${b.px.toFixed(1)}" y2="${b.py.toFixed(1)}" stroke-width="${(0.6 + 2.6 * l.w).toFixed(2)}"/>`;
+    }).join('');
+    // 라벨 자리: 원들이 차지한 곳을 먼저 막고, 큰 키워드부터 아래·위·오른쪽·왼쪽 순으로 빈자리를 찾는다. 자리가 없으면 숨김(원에 마우스를 올리면 보임)
+    const boxes = P.map((n) => ({ x1: n.px - n.r, x2: n.px + n.r, y1: n.py - n.r, y2: n.py + n.r }));
+    const hit = (b) => boxes.some((o) => b.x1 < o.x2 && b.x2 > o.x1 && b.y1 < o.y2 && b.y2 > o.y1);
+    const labels = new Array(P.length).fill(null);
+    P.map((_, i) => i).sort((a, b) => P[b].n - P[a].n).forEach((i) => {
+      const n = P[i];
+      const w = n.name.length * n.fs * 0.56, h = n.fs;
+      // 가운데 정렬 이름표는 지도 밖으로 나가면 안쪽으로 밀어 넣는다
+      const fit = (x1, x2) => (x1 < 2 ? 2 - x1 : x2 > W - 2 ? W - 2 - x2 : 0);
+      const make = (cx, y, a, x1, x2, y1, y2) => {
+        const d = a === 'middle' ? fit(x1, x2) : 0;
+        return { x: cx + d, y, a, b: { x1: x1 + d, x2: x2 + d, y1, y2 } };
+      };
+      const below = [n.py + n.r + h, n.py + n.r + 1, n.py + n.r + h + 3];
+      const above = [n.py - n.r - 4, n.py - n.r - h - 3, n.py - n.r - 1];
+      const cands = [
+        make(n.px, below[0], 'middle', n.px - w / 2, n.px + w / 2, below[1], below[2]),
+        make(n.px, above[0], 'middle', n.px - w / 2, n.px + w / 2, above[1], above[2]),
+        make(n.px + n.r + 4, n.py + h / 3, 'start', n.px + n.r + 2, n.px + n.r + 6 + w, n.py - h / 2, n.py + h / 2),
+        make(n.px - n.r - 4, n.py + h / 3, 'end', n.px - n.r - 6 - w, n.px - n.r - 2, n.py - h / 2, n.py + h / 2),
+        make(n.px - n.r, below[0], 'start', n.px - n.r, n.px - n.r + w, below[1], below[2]),
+        make(n.px + n.r, below[0], 'end', n.px + n.r - w, n.px + n.r, below[1], below[2]),
+        make(n.px - n.r, above[0], 'start', n.px - n.r, n.px - n.r + w, above[1], above[2]),
+        make(n.px + n.r, above[0], 'end', n.px + n.r - w, n.px + n.r, above[1], above[2]),
+      ];
+      const ok = cands.find((c) => c.b.x1 >= 2 && c.b.x2 <= W - 2 && c.b.y1 >= 2 && c.b.y2 <= H - 2 && !hit(c.b));
+      if (ok) { boxes.push(ok.b); labels[i] = ok; }
+    });
+    svg.innerHTML = `<g>${lines}</g>` + P.map((n, i) => `<g class="node" data-kw="${esc(n.name)}" tabindex="0" role="button">
+      <title>${esc(n.name)} · ${n.n.toLocaleString()}편 · 비중 ${n.new ? '새로 상위' : pct(n.change)}</title>
+      <circle cx="${n.px.toFixed(1)}" cy="${n.py.toFixed(1)}" r="${n.r.toFixed(1)}" fill="${changeColor(n.new ? 0.5 : n.change)}"/>
+      ${labels[i] ? `<text x="${labels[i].x.toFixed(1)}" y="${labels[i].y.toFixed(1)}" text-anchor="${labels[i].a}" font-size="${n.fs.toFixed(1)}">${esc(n.name)}</text>` : ''}
+    </g>`).join('');
+    svg.querySelectorAll('.node').forEach((g) => {
+      g.addEventListener('click', () => searchPapersFor(g.dataset.kw));
+      g.addEventListener('keydown', (e) => { if (e.key === 'Enter') searchPapersFor(g.dataset.kw); });
+    });
   }
 
   // ── 스크랩 ──

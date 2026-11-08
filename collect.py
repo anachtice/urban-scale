@@ -694,6 +694,9 @@ def report(day):
 OPENALEX_URL = "https://api.openalex.org/works"
 PAPERS_PATH = os.path.join(DATA_DIR, "papers.json")
 PAPERS_LATEST_PATH = os.path.join(DATA_DIR, "papers-latest.json")
+PAPERS_FORMAT = 3  # 저장 내용이 바뀌면 숫자를 올린다(올리면 다음 실행에서 바로 다시 받는다)
+TRENDS_PATH = os.path.join(DATA_DIR, "trends.json")
+TRENDS_FORMAT = 1
 
 
 def abstract_text(inverted):
@@ -724,6 +727,7 @@ def paper_record(w, journals_by_id, max_abstract):
         "t": clean(w.get("title") or w.get("display_name") or ""),
         "j": j.get("약칭") or j.get("이름") or src.get("display_name", ""),
         "jg": j.get("구분", ""),
+        "f": j.get("분야", ""),
         "date": w.get("publication_date") or "",
         "au": "; ".join(authors[:3]) + (" 외" if len(authors) > 3 else ""),
         "u": doi or loc.get("landing_page_url") or "",
@@ -745,19 +749,32 @@ def fetch_papers(cfg, journals, now):
         "select": "id,doi,title,display_name,publication_date,primary_location,authorships,"
                   "abstract_inverted_index,open_access,best_oa_location,topics,cited_by_count",
     }
-    if os.environ.get("OPENALEX_API_KEY"):
-        params["api_key"] = os.environ["OPENALEX_API_KEY"]
+    key = os.environ.get("OPENALEX_API_KEY", "").strip()
+    status = "키 없음"
+    if key:
+        params["api_key"] = key
+        status = "키 사용"
     # 쪽 번호로 넘긴다. cursor 방식은 2026년부터 API 키가 있어야 두 번째 쪽을 준다.
-    papers = []
-    for page in range(1, 31):  # 100편씩 최대 30쪽
+    papers, page = [], 1
+    while page <= 30:  # 100편씩 최대 30쪽
         params["page"] = page
-        data = json.loads(http_get(OPENALEX_URL + "?" + urllib.parse.urlencode(params)).decode("utf-8"))
-        results = data.get("results") or []
+        try:
+            raw = http_get(OPENALEX_URL + "?" + urllib.parse.urlencode(params))
+        except urllib.error.HTTPError as e:
+            if e.code in (401, 403) and "api_key" in params:
+                # 키가 틀렸으면 키 없이 처음부터 다시 받는다. 키 값은 기록에 남기지 않는다.
+                print(f"  ! OpenAlex가 API 키를 받지 않음({e.code}). 키 없이 다시 받음 — Secrets의 OPENALEX_API_KEY 확인 필요")
+                params.pop("api_key")
+                status, papers, page = "키 거절됨", [], 1
+                continue
+            raise
+        results = json.loads(raw.decode("utf-8")).get("results") or []
         papers += [paper_record(w, by_id, cfg.get("초록 최대 글자 수", 700)) for w in results]
         if len(results) < params["per_page"]:
             break
+        page += 1
         time.sleep(0.2)
-    return [p for p in papers if p["t"]]
+    return [p for p in papers if p["t"]], status
 
 
 def update_papers(now, force=False):
@@ -769,7 +786,8 @@ def update_papers(now, force=False):
     journals = [j for j in cfg.get("학술지", []) if j.get("사용", True) and j.get("OpenAlex ID")]
     if not journals:
         return
-    sig = hashlib.md5(json.dumps([journals, cfg.get("최근 며칠 논문을 보관할지"), cfg.get("초록 최대 글자 수")],
+    ml_words = cfg.get("머신러닝 낱말", [])
+    sig = hashlib.md5(json.dumps([PAPERS_FORMAT, journals, cfg.get("최근 며칠 논문을 보관할지"), cfg.get("초록 최대 글자 수"), ml_words],
                                  ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()[:10]
     if os.path.exists(PAPERS_PATH) and not force:
         with open(PAPERS_PATH, encoding="utf-8") as f:
@@ -781,22 +799,214 @@ def update_papers(now, force=False):
         if fresh and old.get("sig") == sig:
             return
     try:
-        papers = fetch_papers(cfg, journals, now)
+        papers, key_status = fetch_papers(cfg, journals, now)
     except Exception as e:  # 논문을 못 받아도 뉴스 수집은 그대로 끝낸다
         print(f"\n  ! 논문 목록을 받지 못함: {e} (이전 목록 유지)")
         return
+    # 제목·초록에 머신러닝·예측 낱말이 있는 논문 표시 (영어 낱말은 낱말 단위로만 잡는다: 'shap'이 'shape'에 걸리지 않게)
+    parts = [r"\b" + re.escape(w) + r"\b" if w.isascii() else re.escape(w) for w in ml_words]
+    ml_rx = re.compile("|".join(parts), re.I) if parts else None
+    for p in papers:
+        p["ml"] = bool(ml_rx and ml_rx.search(f"{p['t']} {p['ab']}"))
     count = Counter(p["j"] for p in papers)
-    meta = {"updated": now.isoformat(timespec="minutes"), "sig": sig, "days": cfg.get("최근 며칠 논문을 보관할지", 90)}
+    meta = {"updated": now.isoformat(timespec="minutes"), "sig": sig, "days": cfg.get("최근 며칠 논문을 보관할지", 90),
+            "key": key_status}
     save_json(PAPERS_PATH, {
         **meta,
         "journals": [{"name": j["이름"], "short": j.get("약칭") or j["이름"], "group": j.get("구분", ""),
-                      "n": count.get(j.get("약칭") or j["이름"], 0)} for j in journals],
+                      "field": j.get("분야", ""), "n": count.get(j.get("약칭") or j["이름"], 0)} for j in journals],
         "papers": papers,
     })
     latest = sorted(papers, key=lambda p: p["date"], reverse=True)[:8]
     save_json(PAPERS_LATEST_PATH, {**meta, "papers": [{k: p[k] for k in ("id", "t", "j", "date", "u")} for p in latest]})
-    print(f"\n논문 {len(papers)}편 저장 (학술지 {len(journals)}곳) · " +
-          ", ".join(f"{k} {v}" for k, v in count.most_common(6)))
+    print(f"\n논문 {len(papers)}편 저장 (학술지 {len(journals)}곳, OpenAlex {key_status}, 머신러닝·예측 "
+          f"{sum(p['ml'] for p in papers)}편) · " + ", ".join(f"{k} {v}" for k, v in count.most_common(6)))
+
+
+# ───────────────────────── 연구 동향 (OpenAlex) ─────────────────────────
+# 최근 1년(두 달 전까지)과 그 전 1년의 주제·키워드별 논문 수를 세어 비교하고, 많이 나온 키워드끼리
+# 같은 논문에 함께 붙은 횟수로 '키워드 지도'를 만든다. 일주일에 한 번 계산한다.
+
+def oa_works(params, key):
+    p = dict(params)
+    if key:
+        p["api_key"] = key
+    return json.loads(http_get(OPENALEX_URL + "?" + urllib.parse.urlencode(p)).decode("utf-8"))
+
+
+def oa_groups(filt, field, key):
+    """filter에 맞는 논문을 field(주제·키워드)로 묶어 센다. {id: (이름, 편수)}"""
+    out = {}
+    for g in oa_works({"filter": filt, "group_by": field}, key).get("group_by") or []:
+        gid = str(g.get("key") or "").rsplit("/", 1)[-1]
+        if gid:
+            out[gid] = (g.get("key_display_name") or gid, g.get("count") or 0)
+    return out
+
+
+def oa_total(filt, key):
+    return (oa_works({"filter": filt, "per_page": 1, "select": "id"}, key).get("meta") or {}).get("count") or 0
+
+
+def share_changes(recent, prev, n_recent, n_prev):
+    """전체 논문 대비 비중이 그 전 1년보다 얼마나 변했는지. 그 전 상위 목록에 없던 것은 목록의 최솟값으로 본다(보수적)."""
+    floor = min((c for _, c in prev.values()), default=0)
+    rows = []
+    for gid, (name, n) in recent.items():
+        before = prev.get(gid, (name, None))[1]
+        base = before if before is not None else floor
+        share_now = n / max(n_recent, 1)
+        share_before = (base + 5) / max(n_prev, 1)
+        rows.append({"id": gid, "name": name, "n": n, "prev": before,
+                     "change": round(share_now / share_before - 1, 3), "new": before is None})
+    return rows
+
+
+def force_layout(n, weights, iters=600, seed=11):
+    """Fruchterman-Reingold 배치: 함께 자주 쓰인 키워드는 끌어당기고, 나머지는 서로 밀어낸다. 결과는 0~1 좌표."""
+    import random
+    rnd = random.Random(seed)
+    pos = [[rnd.random(), rnd.random()] for _ in range(n)]
+    k = math.sqrt(1.0 / max(n, 1))
+    temp = 0.1
+    for _ in range(iters):
+        disp = [[0.0, 0.0] for _ in range(n)]
+        for i in range(n):
+            for j in range(i + 1, n):
+                dx, dy = pos[i][0] - pos[j][0], pos[i][1] - pos[j][1]
+                d = math.hypot(dx, dy) or 1e-6
+                f = k * k / d
+                disp[i][0] += dx / d * f; disp[i][1] += dy / d * f
+                disp[j][0] -= dx / d * f; disp[j][1] -= dy / d * f
+        for (i, j), w in weights.items():
+            dx, dy = pos[i][0] - pos[j][0], pos[i][1] - pos[j][1]
+            d = math.hypot(dx, dy) or 1e-6
+            f = d * d / k * w
+            disp[i][0] -= dx / d * f; disp[i][1] -= dy / d * f
+            disp[j][0] += dx / d * f; disp[j][1] += dy / d * f
+        for i in range(n):
+            disp[i][0] += (0.5 - pos[i][0]) * 0.6  # 가운데로 약하게 당겨 외톨이 키워드가 멀리 달아나지 않게
+            disp[i][1] += (0.5 - pos[i][1]) * 0.6
+            length = math.hypot(*disp[i]) or 1e-6
+            step = min(length, temp)
+            pos[i][0] += disp[i][0] / length * step
+            pos[i][1] += disp[i][1] / length * step
+        temp = max(temp * 0.985, 0.002)
+    xs, ys = [p[0] for p in pos], [p[1] for p in pos]
+    span_x, span_y = (max(xs) - min(xs)) or 1, (max(ys) - min(ys)) or 1
+    return [[0.07 + 0.86 * (x - min(xs)) / span_x, 0.08 + 0.84 * (y - min(ys)) / span_y] for x, y in zip(xs, ys)]
+
+
+def trend_scope(sc, journals, windows, n_map, key, now):
+    if sc.get("기준") == "학술지":
+        fields = sc.get("분야")
+        fields = [fields] if isinstance(fields, str) else (fields or [])
+        pool = [j for j in journals if not fields or j.get("분야") in fields]
+        base = "primary_location.source.id:" + "|".join(j["OpenAlex ID"] for j in pool)
+    else:
+        base = "primary_topic.subfield.id:" + "|".join(sc.get("OpenAlex 세부분야", []))
+    scope_kw = sc.get("OpenAlex 키워드") or []
+    if scope_kw:
+        base += ",keywords.id:" + "|".join(scope_kw)
+    base += ",type:article|review"
+    f_recent, f_prev = f"{base},{windows[0]}", f"{base},{windows[1]}"
+    n_recent, n_prev = oa_total(f_recent, key), oa_total(f_prev, key)
+    topics = share_changes(oa_groups(f_recent, "primary_topic.id", key), oa_groups(f_prev, "primary_topic.id", key), n_recent, n_prev)
+    kw_recent, kw_prev = oa_groups(f_recent, "keywords.id", key), oa_groups(f_prev, "keywords.id", key)
+    for k in scope_kw:  # 범위를 정한 키워드는 모든 논문에 붙어 있어 지도·순위에서 뺀다
+        kw_recent.pop(k, None)
+    keywords = share_changes(kw_recent, kw_prev, n_recent, n_prev)
+
+    # 키워드 지도: 많이 나온 키워드끼리 같은 논문에 함께 붙은 횟수
+    top = sorted(keywords, key=lambda x: -x["n"])[:n_map]
+    idx = {x["id"]: i for i, x in enumerate(top)}
+    co = {}
+    for x in top:
+        for other, (_, c) in oa_groups(f"{f_recent},keywords.id:{x['id']}", "keywords.id", key).items():
+            if other in idx and other != x["id"]:
+                pair = tuple(sorted((idx[x["id"]], idx[other])))
+                co[pair] = max(co.get(pair, 0), c)
+        time.sleep(0.1)
+    weights = {pair: c / math.sqrt(top[pair[0]]["n"] * top[pair[1]]["n"]) for pair, c in co.items()}
+    strongest = max(weights.values(), default=1) or 1
+    weights = {pair: w / strongest for pair, w in weights.items()}
+    pos = force_layout(len(top), weights)
+    shown = set()
+    for i in range(len(top)):  # 키워드마다 가장 강한 연결 3개만 선으로 그린다
+        mine = sorted(((w, pair) for pair, w in weights.items() if i in pair), reverse=True)[:3]
+        shown.update(pair for w, pair in mine if w >= 0.08)
+
+    cited = oa_works({"filter": f"{base},from_publication_date:{(now - timedelta(days=730)):%Y-%m-%d}",
+                      "sort": "cited_by_count:desc", "per_page": 8,
+                      "select": "id,doi,title,display_name,publication_year,primary_location,cited_by_count"}, key)
+    min_n = max(10, int(n_recent * 0.002))
+    return {
+        "name": sc["이름"],
+        "n": n_recent, "n_prev": n_prev,
+        "topics": sorted(topics, key=lambda x: -x["n"])[:12],
+        "rising_topics": sorted([t for t in topics if t["n"] >= min_n], key=lambda x: -x["change"])[:8],
+        "keywords": sorted(keywords, key=lambda x: -x["n"])[:20],
+        "rising_keywords": sorted([k for k in keywords if k["n"] >= min_n], key=lambda x: -x["change"])[:12],
+        "map": {
+            "nodes": [{"id": x["id"], "name": x["name"], "n": x["n"], "change": x["change"], "new": x["new"],
+                       "x": round(pos[i][0], 4), "y": round(pos[i][1], 4)} for i, x in enumerate(top)],
+            "links": [{"a": a, "b": b, "w": round(weights[(a, b)], 3)} for a, b in sorted(shown)],
+        },
+        "cited": [{
+            "t": clean(w.get("title") or w.get("display_name") or ""),
+            "j": (((w.get("primary_location") or {}).get("source") or {}).get("display_name") or ""),
+            "y": w.get("publication_year"),
+            "u": w.get("doi") or ((w.get("primary_location") or {}).get("landing_page_url") or ""),
+            "cite": w.get("cited_by_count") or 0,
+        } for w in cited.get("results") or []],
+    }
+
+
+def update_trends(now, force=False):
+    try:
+        cfg = load_config("journals.json")
+    except FileNotFoundError:
+        return
+    tcfg = cfg.get("동향") or {}
+    scopes = tcfg.get("범위") or []
+    journals = [j for j in cfg.get("학술지", []) if j.get("사용", True) and j.get("OpenAlex ID")]
+    if not scopes:
+        return
+    n_map = tcfg.get("지도에 넣을 키워드 수", 30)
+    sig = hashlib.md5(json.dumps([TRENDS_FORMAT, scopes, [(j["OpenAlex ID"], j.get("분야")) for j in journals], n_map],
+                                 ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()[:10]
+    old = {}
+    if os.path.exists(TRENDS_PATH):
+        with open(TRENDS_PATH, encoding="utf-8") as f:
+            prev_file = json.load(f)
+        old = {s["name"]: s for s in prev_file.get("scopes", [])}
+        try:
+            fresh = now - datetime.fromisoformat(prev_file.get("updated", "")) < timedelta(days=tcfg.get("갱신 간격(일)", 7))
+        except ValueError:
+            fresh = False
+        if fresh and prev_file.get("sig") == sig and not force:
+            return
+    key = os.environ.get("OPENALEX_API_KEY", "").strip()
+    recent = (now - timedelta(days=425), now - timedelta(days=61))
+    before = (now - timedelta(days=790), now - timedelta(days=426))
+    windows = [f"from_publication_date:{a:%Y-%m-%d},to_publication_date:{b:%Y-%m-%d}" for a, b in (recent, before)]
+    out = []
+    for sc in scopes:
+        try:
+            out.append(trend_scope(sc, journals, windows, n_map, key, now))
+            print(f"  연구 동향 '{sc['이름']}': 최근 1년 {out[-1]['n']:,}편")
+        except Exception as e:  # 한 범위가 실패하면 지난번 결과를 그대로 둔다
+            print(f"  ! 연구 동향 '{sc['이름']}' 계산 실패: {e}")
+            if sc["이름"] in old:
+                out.append(old[sc["이름"]])
+    if not out:
+        return
+    save_json(TRENDS_PATH, {
+        "updated": now.isoformat(timespec="minutes"), "sig": sig, "key": "키 사용" if key else "키 없음",
+        "recent": [f"{recent[0]:%Y-%m-%d}", f"{recent[1]:%Y-%m-%d}"],
+        "before": [f"{before[0]:%Y-%m-%d}", f"{before[1]:%Y-%m-%d}"],
+        "scopes": out,
+    })
 
 
 # ───────────────────────── 실행 ─────────────────────────
@@ -811,6 +1021,7 @@ def main():
                         help="naver: 네이버 뉴스 검색 API (기본), rss: 키 없이 시험하는 구글 뉴스 RSS")
     parser.add_argument("--reprocess", action="store_true", help="새로 모으지 않고 저장된 오늘·어제 기사만 다시 분류")
     parser.add_argument("--papers", action="store_true", help="논문 목록을 지금 바로 새로 받기")
+    parser.add_argument("--trends", action="store_true", help="연구 동향을 지금 바로 다시 계산하기")
     args = parser.parse_args()
 
     load_env_file()
@@ -861,6 +1072,7 @@ def main():
         report(day)
     write_index(index, ctx.settings.get("보관 일수", 0), now, last_run)
     update_papers(now, force=args.papers)
+    update_trends(now, force=args.trends)
     print("\n저장 완료:", os.path.relpath(DATA_DIR, ROOT))
 
 
