@@ -375,9 +375,9 @@ class Classifier:
             if score:
                 scored.append((score, len(t), -order, cat))
         if not scored:
-            return None, []
+            return None, [], 0
         scored.sort(reverse=True)
-        return scored[0][3], [c for s, _, _, c in scored[1:] if s >= 2]
+        return scored[0][3], [c for s, _, _, c in scored[1:] if s >= 2], scored[0][0]
 
 
 # ───────────────────────── 이슈 묶기 ─────────────────────────
@@ -575,6 +575,9 @@ def process_day(date, records, ctx, updated):
         if r["p"] in ctx.blocked_press:
             dropped["연예·스포츠 매체"] += 1
             continue
+        if any(w in title for w in settings.get("제목에 있으면 버릴 말", [])):
+            dropped["버릴 제목 말"] += 1
+            continue
         same = (r["p"], re.sub(r"\W", "", title)[:40])
         if same in seen:
             dropped["같은 기사"] += 1
@@ -583,9 +586,9 @@ def process_day(date, records, ctx, updated):
         if noncap and not areas:
             dropped["비수도권"] += 1
             continue
-        cat, others = ctx.classifier.classify(title, desc)
-        if not cat:
-            dropped["도시 분야 아님"] += 1
+        cat, others, score = ctx.classifier.classify(title, desc)
+        if not cat or score < settings.get("분야 최소 점수", 2):
+            dropped["도시 분야 아님"] += 1  # 요약에만 도시 낱말이 하나 스친 기사도 여기서 빠진다
             continue
         seen.add(same)
         rec = {k: r.get(k) for k in RAW_KEYS}
@@ -685,6 +688,117 @@ def report(day):
         print(f"  {it['rank']:>2}. 언론사 {it['np']:>2}곳·기사 {it['n']:>3}건 [{it['c']}] {it['t'][:60]}  #{' #'.join(it['keys'])}")
 
 
+# ───────────────────────── 학술 논문 (OpenAlex) ─────────────────────────
+# config/journals.json 의 학술지에서 최근 논문의 제목·저자·초록·링크를 받는다. PDF 파일은 저장하지 않는다.
+
+OPENALEX_URL = "https://api.openalex.org/works"
+PAPERS_PATH = os.path.join(DATA_DIR, "papers.json")
+PAPERS_LATEST_PATH = os.path.join(DATA_DIR, "papers-latest.json")
+
+
+def abstract_text(inverted):
+    """OpenAlex는 초록을 {낱말: [위치, ...]} 꼴로 준다. 위치 순서대로 다시 이어 붙인다."""
+    if not inverted:
+        return ""
+    words = {}
+    for w, positions in inverted.items():
+        for p in positions:
+            words[p] = w
+    text = " ".join(words[p] for p in sorted(words))
+    return re.sub(r"^(Abstract|ABSTRACT)[\s:.]+", "", text).strip()
+
+
+def paper_record(w, journals_by_id, max_abstract):
+    loc = w.get("primary_location") or {}
+    src = loc.get("source") or {}
+    j = journals_by_id.get((src.get("id") or "").rsplit("/", 1)[-1], {})
+    authors = [(a.get("author") or {}).get("display_name") for a in (w.get("authorships") or [])]
+    authors = [a for a in authors if a]
+    oa = w.get("open_access") or {}
+    abstract = abstract_text(w.get("abstract_inverted_index"))
+    if len(abstract) > max_abstract:
+        abstract = abstract[:max_abstract].rsplit(" ", 1)[0] + " …"
+    doi = w.get("doi") or ""
+    return {
+        "id": (w.get("id") or "").rsplit("/", 1)[-1],
+        "t": clean(w.get("title") or w.get("display_name") or ""),
+        "j": j.get("약칭") or j.get("이름") or src.get("display_name", ""),
+        "jg": j.get("구분", ""),
+        "date": w.get("publication_date") or "",
+        "au": "; ".join(authors[:3]) + (" 외" if len(authors) > 3 else ""),
+        "u": doi or loc.get("landing_page_url") or "",
+        "pdf": (w.get("best_oa_location") or {}).get("pdf_url"),
+        "oa": oa.get("oa_url") if oa.get("is_oa") else None,
+        "ab": abstract,
+        "tp": [t.get("display_name") for t in (w.get("topics") or [])[:2] if t.get("display_name")],
+        "cite": w.get("cited_by_count") or 0,
+    }
+
+
+def fetch_papers(cfg, journals, now):
+    by_id = {j["OpenAlex ID"]: j for j in journals}
+    since = (now - timedelta(days=cfg.get("최근 며칠 논문을 보관할지", 90))).strftime("%Y-%m-%d")
+    params = {
+        "filter": f"primary_location.source.id:{'|'.join(by_id)},from_publication_date:{since},type:article|review",
+        "sort": "publication_date:desc",
+        "per_page": 100,  # OpenAlex 문서 기준 한 쪽 최대 100편
+        "select": "id,doi,title,display_name,publication_date,primary_location,authorships,"
+                  "abstract_inverted_index,open_access,best_oa_location,topics,cited_by_count",
+    }
+    if os.environ.get("OPENALEX_API_KEY"):
+        params["api_key"] = os.environ["OPENALEX_API_KEY"]
+    # 쪽 번호로 넘긴다. cursor 방식은 2026년부터 API 키가 있어야 두 번째 쪽을 준다.
+    papers = []
+    for page in range(1, 31):  # 100편씩 최대 30쪽
+        params["page"] = page
+        data = json.loads(http_get(OPENALEX_URL + "?" + urllib.parse.urlencode(params)).decode("utf-8"))
+        results = data.get("results") or []
+        papers += [paper_record(w, by_id, cfg.get("초록 최대 글자 수", 700)) for w in results]
+        if len(results) < params["per_page"]:
+            break
+        time.sleep(0.2)
+    return [p for p in papers if p["t"]]
+
+
+def update_papers(now, force=False):
+    """논문 목록은 하루 한 번(설정의 '갱신 간격')만 새로 받는다. 학술지 목록을 고치면 바로 다시 받는다."""
+    try:
+        cfg = load_config("journals.json")
+    except FileNotFoundError:
+        return
+    journals = [j for j in cfg.get("학술지", []) if j.get("사용", True) and j.get("OpenAlex ID")]
+    if not journals:
+        return
+    sig = hashlib.md5(json.dumps([journals, cfg.get("최근 며칠 논문을 보관할지"), cfg.get("초록 최대 글자 수")],
+                                 ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()[:10]
+    if os.path.exists(PAPERS_PATH) and not force:
+        with open(PAPERS_PATH, encoding="utf-8") as f:
+            old = json.load(f)
+        try:
+            fresh = now - datetime.fromisoformat(old.get("updated", "")) < timedelta(hours=cfg.get("갱신 간격(시간)", 20))
+        except ValueError:
+            fresh = False
+        if fresh and old.get("sig") == sig:
+            return
+    try:
+        papers = fetch_papers(cfg, journals, now)
+    except Exception as e:  # 논문을 못 받아도 뉴스 수집은 그대로 끝낸다
+        print(f"\n  ! 논문 목록을 받지 못함: {e} (이전 목록 유지)")
+        return
+    count = Counter(p["j"] for p in papers)
+    meta = {"updated": now.isoformat(timespec="minutes"), "sig": sig, "days": cfg.get("최근 며칠 논문을 보관할지", 90)}
+    save_json(PAPERS_PATH, {
+        **meta,
+        "journals": [{"name": j["이름"], "short": j.get("약칭") or j["이름"], "group": j.get("구분", ""),
+                      "n": count.get(j.get("약칭") or j["이름"], 0)} for j in journals],
+        "papers": papers,
+    })
+    latest = sorted(papers, key=lambda p: p["date"], reverse=True)[:8]
+    save_json(PAPERS_LATEST_PATH, {**meta, "papers": [{k: p[k] for k in ("id", "t", "j", "date", "u")} for p in latest]})
+    print(f"\n논문 {len(papers)}편 저장 (학술지 {len(journals)}곳) · " +
+          ", ".join(f"{k} {v}" for k, v in count.most_common(6)))
+
+
 # ───────────────────────── 실행 ─────────────────────────
 
 def main():
@@ -696,6 +810,7 @@ def main():
     parser.add_argument("--source", choices=["naver", "rss"], default="naver",
                         help="naver: 네이버 뉴스 검색 API (기본), rss: 키 없이 시험하는 구글 뉴스 RSS")
     parser.add_argument("--reprocess", action="store_true", help="새로 모으지 않고 저장된 오늘·어제 기사만 다시 분류")
+    parser.add_argument("--papers", action="store_true", help="논문 목록을 지금 바로 새로 받기")
     args = parser.parse_args()
 
     load_env_file()
@@ -745,6 +860,7 @@ def main():
         index[d] = {"d": d, "n": day["count"], "u": updated}
         report(day)
     write_index(index, ctx.settings.get("보관 일수", 0), now, last_run)
+    update_papers(now, force=args.papers)
     print("\n저장 완료:", os.path.relpath(DATA_DIR, ROOT))
 
 

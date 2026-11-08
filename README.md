@@ -16,6 +16,7 @@
 | `config/regions.json` | 서울 25개 구·동네, 신도시, 경기·인천 시 이름, 거를 비수도권 지명 |
 | `config/press.json` | 언론사 도메인 → 이름, 뺄 매체(연예·스포츠) |
 | `config/settings.json` | 모으는 시간 범위, 사설·칼럼 머리말, 이슈 묶는 기준 |
+| `config/journals.json` | 논문을 받아 올 학술지 (OpenAlex) |
 | `docs/index.html` | 사이트 화면 |
 | `docs/data/` | 날짜별 기사 파일 (자동으로 쌓인다) |
 | `.github/workflows/collect.yml` | 하루 여섯 번 자동 실행 (한국시간 7·10·13·16·19·22시) |
@@ -52,6 +53,13 @@ Client Secret은 비밀번호와 같다. 채팅·코드·스크린샷에 붙이�
 ### 4. 첫 수집 돌리기
 
 저장소 → **Actions** → 왼쪽 **뉴스 수집** → **Run workflow**. 2~3분 뒤 초록 체크가 뜨면, 1~2분 더 기다렸다가 사이트에 들어간다. 이후로는 하루 여섯 번 저절로 돈다.
+
+## 논문
+
+- OpenAlex(공개 학술 데이터베이스)에서 `config/journals.json`의 학술지 최근 90일 논문을 하루 한 번 받는다. 기본은 해외 18곳(CEUS, Urban Studies, Cities, JAPA, IJURR 등)과 국내 4곳(국토계획, 한국도시행정학보, 도시설계, 서울도시연구).
+- PDF 파일은 저장하지 않는다. 무료 공개 원문만 바로 연결하고, 유료 논문은 DOI로 연결한다(교내망이나 학교 도서관 로그인으로 연다).
+- 학술지를 끄려면 그 줄의 `"사용": true`를 `false`로 바꾼다. 새 학술지는 https://api.openalex.org/sources/issn:ISSN번호 에서 id(S로 시작)를 찾아 한 줄 더한다.
+- API 키 없이 돈다. 하루 이용 한도를 10배로 늘리려면 https://openalex.org/settings/api 에서 무료 키를 받아 Secrets에 `OPENALEX_API_KEY`로 넣는다.
 
 ## 규칙 고치기
 

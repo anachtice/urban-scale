@@ -23,12 +23,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: 뉴스 수집·정리
         env:
           NAVER_CLIENT_ID: ${{ secrets.NAVER_CLIENT_ID }}
           NAVER_CLIENT_SECRET: ${{ secrets.NAVER_CLIENT_SECRET }}
+          OPENALEX_API_KEY: ${{ secrets.OPENALEX_API_KEY }}   # 없어도 됨(논문 목록 하루 이용 한도만 늘어남)
           PYTHONUTF8: "1"
         run: |
           if [ "${{ github.event_name }}" = "push" ] && ls docs/data/20*.json >/dev/null 2>&1; then
